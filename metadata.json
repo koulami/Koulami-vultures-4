@@ -1,0 +1,8 @@
+{
+  "name": "Remix Vulture Arena: Cyprus",
+  "description": "Διαδραστική εκπαιδευτική αρένα και κουίζ γνώσεων για το Γύπα Πυρόχρους στην Κύπρο.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
