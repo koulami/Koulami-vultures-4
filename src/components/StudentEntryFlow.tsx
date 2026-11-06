@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Team } from '../types/game';
 import {
   Users,
@@ -19,6 +19,8 @@ import {
   ArrowRight,
   Check,
   Info,
+  RotateCcw,
+  Play,
 } from 'lucide-react';
 
 interface StudentEntryFlowProps {
@@ -34,6 +36,9 @@ interface StudentEntryFlowProps {
   onOpenAdminLogin: () => void;
   roomPin?: string;
   durationMinutes?: number;
+  isReturningStudent?: boolean;
+  onContinueSession?: () => void;
+  onStartOverThisDeviceOnly?: () => void;
 }
 
 export const StudentEntryFlow: React.FC<StudentEntryFlowProps> = ({
@@ -49,6 +54,9 @@ export const StudentEntryFlow: React.FC<StudentEntryFlowProps> = ({
   onOpenAdminLogin,
   roomPin = 'GYPES-2026',
   durationMinutes = 15,
+  isReturningStudent = false,
+  onContinueSession,
+  onStartOverThisDeviceOnly,
 }) => {
   const isEn = language === 'en';
 
@@ -59,6 +67,12 @@ export const StudentEntryFlow: React.FC<StudentEntryFlowProps> = ({
   // Local state for team selection (before final confirmation)
   const [tentativeTeamId, setTentativeTeamId] = useState<string | null>(selectedTeamId);
   const [showConfirmModal, setShowConfirmModal] = useState<boolean>(false);
+
+  // Sync tentativeTeamId when selectedTeamId changes (e.g. when Start Over resets selectedTeamId to null)
+  useEffect(() => {
+    setTentativeTeamId(selectedTeamId);
+    setShowConfirmModal(false);
+  }, [selectedTeamId]);
 
   // Find selected team object
   const activeLockedTeam = teams.find((t) => t.id === selectedTeamId);
@@ -84,6 +98,188 @@ export const StudentEntryFlow: React.FC<StudentEntryFlowProps> = ({
       setShowConfirmModal(false);
     }
   };
+
+  // =========================================================================
+  // STATE 0: RETURNING STUDENT CHOICE SCREEN (Continue vs Start Over on This Device)
+  // Must be the FIRST rendering condition, depending on isReturningStudent alone.
+  // =========================================================================
+  if (isReturningStudent) {
+    const lockedTeam = selectedTeamId ? teams.find((t) => t.id === selectedTeamId) : null;
+    const teamTitle = lockedTeam ? (isEn ? (lockedTeam.titleEn || lockedTeam.title) : lockedTeam.title) : '';
+    const teamNumber = lockedTeam?.number || 1;
+    const teamColor = lockedTeam?.color || '#d97706';
+    const teamAvatar = lockedTeam?.avatar || '🦅';
+
+    return (
+      <div className="min-h-screen bg-stone-900 text-stone-100 flex flex-col font-sans selection:bg-amber-400 selection:text-stone-950">
+        {/* Top Minimal Bar */}
+        <header className="p-4 sm:p-6 flex items-center justify-between max-w-5xl mx-auto w-full">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-2xl">
+              🦅
+            </div>
+            <div>
+              <span className="text-xs font-bold uppercase tracking-wider text-amber-400 block">
+                LIFE with Vultures
+              </span>
+              <span className="text-sm font-extrabold text-white block">
+                {isEn ? 'On the Brink of Extinction - Vultures in Cyprus' : 'Στο χείλος της εξαφάνισης - οι Γύπες στην Κύπρο'}
+              </span>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {/* Language Switcher */}
+            <div className="flex items-center bg-stone-950/80 border border-stone-800 rounded-xl p-1 shadow-2xs">
+              <button
+                type="button"
+                onClick={() => onSetLanguage('el')}
+                className={`px-2.5 py-1 text-xs rounded-lg transition-all font-bold cursor-pointer ${
+                  language === 'el' ? 'bg-amber-500 text-stone-950' : 'text-stone-400 hover:text-white'
+                }`}
+              >
+                🇬🇷 ΕΛ
+              </button>
+              <button
+                type="button"
+                onClick={() => onSetLanguage('en')}
+                className={`px-2.5 py-1 text-xs rounded-lg transition-all font-bold cursor-pointer ${
+                  language === 'en' ? 'bg-amber-500 text-stone-950' : 'text-stone-400 hover:text-white'
+                }`}
+              >
+                🇬🇧 EN
+              </button>
+            </div>
+
+            {/* Admin Login Modal Trigger */}
+            <button
+              onClick={onOpenAdminLogin}
+              className="p-2 rounded-xl bg-stone-800 hover:bg-stone-700 text-stone-300 border border-stone-700 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+              title={isEn ? 'Administrator Access' : 'Σύνδεση Διαχειριστή'}
+            >
+              <Lock className="w-3.5 h-3.5 text-stone-400" />
+              <span className="hidden sm:inline">{isEn ? 'Admin' : 'Διαχειριστής'}</span>
+            </button>
+          </div>
+        </header>
+
+        {/* Center Choice Card */}
+        <main className="flex-1 flex items-center justify-center p-4 sm:p-6">
+          <div className="bg-stone-950/90 border border-stone-800 rounded-3xl p-6 sm:p-10 max-w-lg w-full shadow-2xl space-y-6 text-center backdrop-blur-md">
+            <div
+              className="w-16 h-16 rounded-2xl flex items-center justify-center text-3xl mx-auto shadow-inner border-2"
+              style={{
+                backgroundColor: `${teamColor}20`,
+                borderColor: teamColor,
+              }}
+            >
+              {teamAvatar}
+            </div>
+
+            <div className="space-y-2">
+              <span className="text-[11px] font-black uppercase tracking-widest text-amber-400 bg-amber-500/10 border border-amber-500/20 px-3 py-1 rounded-full">
+                {isEn ? 'Returning Student' : 'Επιστροφή Μαθητή'}
+              </span>
+              <h2 className="text-xl sm:text-2xl font-black text-white">
+                {isEn ? 'Welcome Back!' : 'Καλώς Ήρθατε Πάλι!'}
+              </h2>
+              <p className="text-xs sm:text-sm text-stone-300 leading-relaxed">
+                {isEn
+                  ? 'An active game session for this device was found.'
+                  : 'Εντοπίστηκε ενεργή συνεδρία παιχνιδιού για αυτή τη συσκευή.'}
+              </p>
+
+              {lockedTeam ? (
+                <div
+                  className="mt-3 p-3.5 rounded-2xl bg-stone-900 border text-left flex items-center gap-3.5"
+                  style={{ borderColor: `${teamColor}60` }}
+                >
+                  <div
+                    className="w-10 h-10 rounded-xl flex items-center justify-center text-xl shrink-0"
+                    style={{ backgroundColor: `${teamColor}30` }}
+                  >
+                    {teamAvatar}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <span
+                      className="text-[10px] font-bold px-2 py-0.5 rounded-full text-white inline-block mb-0.5"
+                      style={{ backgroundColor: teamColor }}
+                    >
+                      {isEn ? `Team ${teamNumber}` : `Ομάδα ${teamNumber}`}
+                    </span>
+                    <h4 className="text-sm font-black text-white truncate">
+                      {teamTitle}
+                    </h4>
+                  </div>
+                </div>
+              ) : (
+                <div className="mt-3 p-3 rounded-2xl bg-stone-900 border border-stone-800 text-left text-xs text-stone-400 flex items-center gap-2">
+                  <Info className="w-4 h-4 text-amber-400 shrink-0" />
+                  <span>
+                    {isEn
+                      ? 'Previous team details could not be identified, but your session is saved.'
+                      : 'Δεν ήταν δυνατή η πλήρης αναγνώριση της προηγούμενης ομάδας, αλλά η συνεδρία σας είναι αποθηκευμένη.'}
+                  </span>
+                </div>
+              )}
+            </div>
+
+            {/* Action Buttons */}
+            <div className="space-y-3 pt-2 text-left">
+              {/* Option 1: Continue */}
+              <button
+                type="button"
+                onClick={onContinueSession}
+                className="w-full p-4 bg-amber-500 hover:bg-amber-400 text-stone-950 font-black rounded-2xl text-sm sm:text-base transition-all shadow-lg hover:shadow-amber-500/20 flex items-center justify-between gap-3 cursor-pointer group"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-stone-950/20 flex items-center justify-center text-stone-950 shrink-0">
+                    <Play className="w-5 h-5 fill-current" />
+                  </div>
+                  <div>
+                    <span className="block font-black leading-tight text-stone-950">
+                      {isEn ? 'Continue Previous Session' : 'Συνέχεια Προηγούμενης Συνεδρίας'}
+                    </span>
+                    <span className="block text-xs font-semibold text-stone-800 leading-tight">
+                      {isEn ? 'Resume with existing locked team' : 'Συνέχεια με την τρέχουσα ομάδα'}
+                    </span>
+                  </div>
+                </div>
+                <ChevronRight className="w-5 h-5 text-stone-950 group-hover:translate-x-1 transition-transform shrink-0" />
+              </button>
+
+              {/* Option 2: Start Over on this device only */}
+              <button
+                type="button"
+                onClick={() => {
+                  setTentativeTeamId(null);
+                  if (onStartOverThisDeviceOnly) {
+                    onStartOverThisDeviceOnly();
+                  }
+                }}
+                className="w-full p-4 bg-stone-900 hover:bg-stone-850 text-stone-200 hover:text-white border border-stone-700 hover:border-amber-500/50 font-bold rounded-2xl text-sm transition-all flex items-center justify-between gap-3 cursor-pointer group"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-stone-800 border border-stone-700 flex items-center justify-center text-amber-400 shrink-0">
+                    <RotateCcw className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <span className="block font-bold leading-tight text-white">
+                      {isEn ? 'Start Over on This Device' : 'Νέα αρχή σε αυτή τη συσκευή'}
+                    </span>
+                    <span className="block text-xs font-normal text-stone-400 leading-tight">
+                      {isEn ? 'Choose a team again (PIN preserved)' : 'Επιλογή νέας ομάδας (διατήρηση PIN)'}
+                    </span>
+                  </div>
+                </div>
+                <ChevronRight className="w-4 h-4 text-stone-500 group-hover:translate-x-1 transition-transform shrink-0" />
+              </button>
+            </div>
+          </div>
+        </main>
+      </div>
+    );
+  }
 
   // =========================================================================
   // STATE 1: NOT CONNECTED YET - ENTER GAME ACCESS CODE
@@ -654,6 +850,20 @@ export const StudentEntryFlow: React.FC<StudentEntryFlowProps> = ({
                       : 'Η ομάδα είναι κλειδωμένη για αυτή τη συνεδρία. Ανανέωση της σελίδας θα επαναφέρει αυτόματα την ομάδα σας.'}
                   </span>
                 </div>
+              </div>
+            )}
+
+            {/* Start Over on this device option */}
+            {onStartOverThisDeviceOnly && (
+              <div className="pt-2">
+                <button
+                  type="button"
+                  onClick={onStartOverThisDeviceOnly}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-stone-900 hover:bg-stone-850 text-stone-400 hover:text-amber-400 border border-stone-800 text-xs font-semibold transition-colors cursor-pointer"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>{isEn ? 'Change Team / Start Over on this device' : 'Αλλαγή Ομάδας / Νέα αρχή σε αυτή τη συσκευή'}</span>
+                </button>
               </div>
             )}
 

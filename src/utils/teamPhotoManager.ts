@@ -40,6 +40,68 @@ export function loadAllPhotoSubmissions(): TeamPhotoSubmission[] {
 }
 
 /**
+ * Compresses and resizes an image File or Blob so that it does not exceed maxDimension (e.g. 1200px)
+ * and uses JPEG compression (~0.8 quality). This prevents browser localStorage QuotaExceededError
+ * and memory spikes when students capture high-resolution camera photos (e.g. 12MP-48MP).
+ */
+export async function compressAndResizeImage(
+  file: File | Blob,
+  maxDimension: number = 1200,
+  quality: number = 0.82
+): Promise<string> {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onerror = () => {
+      resolve('');
+    };
+    reader.onload = (e) => {
+      const dataUrl = e.target?.result as string;
+      if (!dataUrl) {
+        resolve('');
+        return;
+      }
+      if (typeof window === 'undefined' || typeof document === 'undefined') {
+        resolve(dataUrl);
+        return;
+      }
+      const img = new Image();
+      img.onerror = () => {
+        resolve(dataUrl);
+      };
+      img.onload = () => {
+        try {
+          let { width, height } = img;
+          if (width > maxDimension || height > maxDimension) {
+            if (width > height) {
+              height = Math.round((height * maxDimension) / width);
+              width = maxDimension;
+            } else {
+              width = Math.round((width * maxDimension) / height);
+              height = maxDimension;
+            }
+          }
+          const canvas = document.createElement('canvas');
+          canvas.width = Math.max(1, width);
+          canvas.height = Math.max(1, height);
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            resolve(dataUrl);
+            return;
+          }
+          ctx.drawImage(img, 0, 0, width, height);
+          const compressed = canvas.toDataURL('image/jpeg', quality);
+          resolve(compressed || dataUrl);
+        } catch {
+          resolve(dataUrl);
+        }
+      };
+      img.src = dataUrl;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+/**
  * Saves or updates a team photo submission in local storage.
  * Preserves the link between the photograph, its original activity, and the submitting team.
  */
@@ -52,7 +114,11 @@ export function savePhotoSubmission(submission: TeamPhotoSubmission): TeamPhotoS
       (s) => !(s.teamId === submission.teamId && s.questionId === submission.questionId)
     );
     const updated = [...filtered, submission];
-    localStorage.setItem(SUBMISSIONS_STORAGE_KEY, JSON.stringify(updated));
+    try {
+      localStorage.setItem(SUBMISSIONS_STORAGE_KEY, JSON.stringify(updated));
+    } catch (storageErr) {
+      console.warn('LocalStorage quota reached when saving photo submission, keeping in-memory:', storageErr);
+    }
     return updated;
   } catch (err) {
     console.error('Failed to save team photo submission:', err);

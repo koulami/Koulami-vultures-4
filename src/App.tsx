@@ -50,6 +50,7 @@ import {
   loadAllPhotoSubmissions,
   savePhotoSubmission,
   getAuthenticPhotosForTeam,
+  compressAndResizeImage,
 } from './utils/teamPhotoManager';
 import { TeamPoster } from './components/TeamPoster';
 import { CreatePosterModal } from './components/CreatePosterModal';
@@ -77,6 +78,7 @@ import {
   XCircle,
   QrCode,
   Camera,
+  ImageIcon,
   Video,
   Layers,
   BookOpen,
@@ -184,11 +186,24 @@ export default function App() {
 
   // Navigation & Filters
   const [activeTab, setActiveTab] = useState<'arena' | 'teams' | 'posters' | 'pool' | 'guide'>('arena');
-  const [selectedTeamFilter, setSelectedTeamFilter] = useState<string>('all');
+  const [selectedTeamFilter, setSelectedTeamFilter] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      const locked = localStorage.getItem('vulture_student_team_locked') === 'true';
+      const teamId = localStorage.getItem('vulture_student_locked_team_id');
+      if (locked && teamId) return teamId;
+    }
+    return 'all';
+  });
   const [selectedTypeFilter, setSelectedTypeFilter] = useState<string>('all');
   const [selectedStatusFilter, setSelectedStatusFilter] = useState<'all' | 'active' | 'inactive'>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
-  const [selectedPosterTeamId, setSelectedPosterTeamId] = useState<string>('team-characteristics');
+  const [selectedPosterTeamId, setSelectedPosterTeamId] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      const teamId = localStorage.getItem('vulture_student_locked_team_id');
+      if (teamId) return teamId;
+    }
+    return 'team-characteristics';
+  });
 
   // Admin Mode State
   const [isAdminLoggedIn, setIsAdminLoggedIn] = useState<boolean>(() => {
@@ -232,7 +247,11 @@ export default function App() {
   }, [teams]);
 
   useEffect(() => {
-    localStorage.setItem('vulture_posters_custom_v2', JSON.stringify(posters));
+    try {
+      localStorage.setItem('vulture_posters_custom_v2', JSON.stringify(posters));
+    } catch (e) {
+      console.warn('LocalStorage quota reached when saving posters state, keeping in-memory:', e);
+    }
   }, [posters]);
 
   useEffect(() => {
@@ -274,6 +293,20 @@ export default function App() {
       return Boolean(locked && teamId);
     }
     return false;
+  });
+
+  // Track whether a returning student with an existing locked team has made their choice (Continue or Start Over)
+  const [hasConfirmedReturningStudent, setHasConfirmedReturningStudent] = useState<boolean>(() => {
+    if (typeof window !== 'undefined') {
+      const isLocked =
+        localStorage.getItem('vulture_student_team_locked') === 'true' &&
+        Boolean(localStorage.getItem('vulture_student_locked_team_id'));
+      // If student has an existing locked team on this device, ALWAYS require explicit choice on entry/reload
+      if (isLocked) {
+        return false;
+      }
+    }
+    return true;
   });
 
   // Game active state (authoritative across all student and teacher screens)
@@ -674,11 +707,24 @@ export default function App() {
   };
 
   // Helper to report student progress to server for administrator monitoring
+  // Helper to report student progress to server for administrator monitoring
   const reportProgressToServer = (tId: string, answered: number, currentScore: number) => {
+    if (!tId) return;
     try {
       const teamQuestionsCount = questions.filter(
         (q) => q.isActive && q.assignedTeamIds.includes(tId)
       ).length;
+
+      // CRITICAL DATA SAFETY: Never overwrite server progress if existing server progress has higher count or score
+      const existingReport = allTeamsProgress[tId];
+      if (existingReport) {
+        if (
+          answered < existingReport.answeredCount ||
+          (answered === existingReport.answeredCount && currentScore < existingReport.score)
+        ) {
+          return;
+        }
+      }
 
       fetch('/api/game/team-progress', {
         method: 'POST',
@@ -700,8 +746,6 @@ export default function App() {
     if (isStudentTeamLocked && studentSelectedTeamId) {
       setSelectedTeamFilter(studentSelectedTeamId);
       setSelectedPosterTeamId(studentSelectedTeamId);
-      // Report initial team presence
-      reportProgressToServer(studentSelectedTeamId, answeredCount, score);
     }
   }, [isStudentTeamLocked, studentSelectedTeamId]);
 
@@ -725,13 +769,13 @@ export default function App() {
   const handleConfirmAndLockTeam = (teamId: string) => {
     setStudentSelectedTeamId(teamId);
     setIsStudentTeamLocked(true);
+    setHasConfirmedReturningStudent(true);
     setSelectedTeamFilter(teamId);
     setSelectedPosterTeamId(teamId);
     if (typeof window !== 'undefined') {
       localStorage.setItem('vulture_student_team_locked', 'true');
       localStorage.setItem('vulture_student_locked_team_id', teamId);
     }
-    reportProgressToServer(teamId, answeredCount, score);
   };
 
   // Administrator simultaneous game start handler:
@@ -923,8 +967,83 @@ export default function App() {
     }
   };
 
+  // --- STUDENT DEVICE SESSION PROGRESS RESTORATION HELPERS ---
+  interface SubmittedAnswerRecord {
+    isCorrect: boolean;
+    pointsAwarded: number;
+    submittedAtMs: number;
+  }
+
+  interface StudentDeviceProgress {
+    teamId: string;
+    currentQuestionIndex: number;
+    currentQuestionId: string;
+    answeredCount: number;
+    score: number;
+    submittedQuestionIds: string[];
+    submittedAnswers?: Record<string, SubmittedAnswerRecord>;
+    feedbackActiveForQuestionId?: string | null;
+    feedbackEndsAtMs?: number | null;
+    lastSavedAtMs: number;
+  }
+
+  const getStudentProgressKey = (teamId: string) => `vulture_student_progress_${teamId}`;
+
+  const loadStudentDeviceProgress = (teamId: string | null): StudentDeviceProgress | null => {
+    if (typeof window === 'undefined' || !teamId) return null;
+    try {
+      const raw = localStorage.getItem(getStudentProgressKey(teamId));
+      if (!raw) return null;
+      return JSON.parse(raw);
+    } catch (err) {
+      console.warn('Failed to parse student device progress:', err);
+      return null;
+    }
+  };
+
+  const saveStudentDeviceProgress = (data: StudentDeviceProgress) => {
+    if (typeof window === 'undefined' || !data.teamId) return;
+    try {
+      localStorage.setItem(getStudentProgressKey(data.teamId), JSON.stringify(data));
+    } catch (err) {
+      console.warn('Failed to save student device progress:', err);
+    }
+  };
+
   // Active question in the Play/Arena simulator
-  const [currentQuestionIndex, setCurrentQuestionIndex] = useState<number>(0);
+  const [currentQuestionIndex, setCurrentQuestionIndex] = useState<number>(() => {
+    if (typeof window !== 'undefined') {
+      const teamId = localStorage.getItem('vulture_student_locked_team_id');
+      const saved = loadStudentDeviceProgress(teamId);
+      if (saved && typeof saved.currentQuestionIndex === 'number') {
+        return saved.currentQuestionIndex;
+      }
+    }
+    return 0;
+  });
+
+  const [submittedQuestionIds, setSubmittedQuestionIds] = useState<string[]>(() => {
+    if (typeof window !== 'undefined') {
+      const teamId = localStorage.getItem('vulture_student_locked_team_id');
+      const saved = loadStudentDeviceProgress(teamId);
+      if (saved && Array.isArray(saved.submittedQuestionIds)) {
+        return saved.submittedQuestionIds;
+      }
+    }
+    return [];
+  });
+
+  const [submittedAnswers, setSubmittedAnswers] = useState<Record<string, SubmittedAnswerRecord>>(() => {
+    if (typeof window !== 'undefined') {
+      const teamId = localStorage.getItem('vulture_student_locked_team_id');
+      const saved = loadStudentDeviceProgress(teamId);
+      if (saved && saved.submittedAnswers) {
+        return saved.submittedAnswers;
+      }
+    }
+    return {};
+  });
+
   const [userSingleChoice, setUserSingleChoice] = useState<string | null>(null);
   const [userMultiChoice, setUserMultiChoice] = useState<string[]>([]);
   const [userTrueFalse, setUserTrueFalse] = useState<boolean | null>(null);
@@ -992,8 +1111,35 @@ export default function App() {
       setIsFeedbackPeriodActive(false);
     }
   }, [isGameStarted, isTimeExpired]);
-  const [score, setScore] = useState<number>(0);
-  const [answeredCount, setAnsweredCount] = useState<number>(0);
+
+  const [score, setScore] = useState<number>(() => {
+    if (typeof window !== 'undefined') {
+      const teamId = localStorage.getItem('vulture_student_locked_team_id');
+      const saved = loadStudentDeviceProgress(teamId);
+      if (saved && typeof saved.score === 'number') {
+        return saved.score;
+      }
+    }
+    return 0;
+  });
+
+  const [answeredCount, setAnsweredCount] = useState<number>(() => {
+    if (typeof window !== 'undefined') {
+      const teamId = localStorage.getItem('vulture_student_locked_team_id');
+      const saved = loadStudentDeviceProgress(teamId);
+      if (saved && typeof saved.answeredCount === 'number') {
+        return saved.answeredCount;
+      }
+    }
+    return 0;
+  });
+
+  // Report progress updates to server if confirmed returning student and progress exists
+  useEffect(() => {
+    if (isStudentTeamLocked && studentSelectedTeamId && hasConfirmedReturningStudent && answeredCount > 0) {
+      reportProgressToServer(studentSelectedTeamId, answeredCount, score);
+    }
+  }, [isStudentTeamLocked, studentSelectedTeamId, hasConfirmedReturningStudent, answeredCount, score]);
 
 // YouTube URL helpers
 function getYouTubeEmbedUrl(url: string): string {
@@ -1066,7 +1212,27 @@ function isYouTubeUrl(url: string): boolean {
     }
     setIsFeedbackPeriodActive(false);
     resetQuestionState();
-    setCurrentQuestionIndex((prev) => (prev + 1) % (activeQuestions.length || 1));
+    const nextIndex = (currentQuestionIndex + 1) % (activeQuestions.length || 1);
+    setCurrentQuestionIndex(nextIndex);
+
+    const nextQ = activeQuestions[nextIndex];
+    const isAlreadySubmitted = Boolean(nextQ && submittedQuestionIds.includes(nextQ.id));
+    setIsAnswerSubmitted(isAlreadySubmitted);
+
+    if (!isAdminLoggedIn && studentSelectedTeamId && nextQ) {
+      saveStudentDeviceProgress({
+        teamId: studentSelectedTeamId,
+        currentQuestionIndex: nextIndex,
+        currentQuestionId: nextQ.id,
+        answeredCount,
+        score,
+        submittedQuestionIds,
+        submittedAnswers,
+        feedbackActiveForQuestionId: null,
+        feedbackEndsAtMs: null,
+        lastSavedAtMs: Date.now(),
+      });
+    }
   };
 
   // Reset interactive inputs when changing question
@@ -1134,7 +1300,157 @@ function isYouTubeUrl(url: string): boolean {
     }
     setIsFeedbackPeriodActive(false);
     resetQuestionState();
-    setCurrentQuestionIndex((prev) => (prev - 1 + activeQuestions.length) % (activeQuestions.length || 1));
+    const prevIndex = (currentQuestionIndex - 1 + activeQuestions.length) % (activeQuestions.length || 1);
+    setCurrentQuestionIndex(prevIndex);
+
+    const prevQ = activeQuestions[prevIndex];
+    const isAlreadySubmitted = Boolean(prevQ && submittedQuestionIds.includes(prevQ.id));
+    setIsAnswerSubmitted(isAlreadySubmitted);
+
+    if (!isAdminLoggedIn && studentSelectedTeamId && prevQ) {
+      saveStudentDeviceProgress({
+        teamId: studentSelectedTeamId,
+        currentQuestionIndex: prevIndex,
+        currentQuestionId: prevQ.id,
+        answeredCount,
+        score,
+        submittedQuestionIds,
+        submittedAnswers,
+        feedbackActiveForQuestionId: null,
+        feedbackEndsAtMs: null,
+        lastSavedAtMs: Date.now(),
+      });
+    }
+  };
+
+  // Synchronize submitted state when viewing a question in submittedQuestionIds
+  useEffect(() => {
+    if (currentQ && submittedQuestionIds.includes(currentQ.id)) {
+      setIsAnswerSubmitted(true);
+    }
+  }, [currentQ?.id, submittedQuestionIds]);
+
+  // Returning student choice 1: Continue with existing locked team and restore saved question position
+  const handleContinueStudentSession = () => {
+    const teamId = studentSelectedTeamId || (typeof window !== 'undefined' ? localStorage.getItem('vulture_student_locked_team_id') : null);
+    if (teamId) {
+      setSelectedTeamFilter(teamId);
+      setSelectedPosterTeamId(teamId);
+
+      const teamQuestions = questions.filter((q) => q.isActive && q.assignedTeamIds.includes(teamId));
+      const savedData = loadStudentDeviceProgress(teamId);
+
+      if (savedData) {
+        if (typeof savedData.score === 'number') {
+          setScore(savedData.score);
+        }
+        if (typeof savedData.answeredCount === 'number') {
+          setAnsweredCount(savedData.answeredCount);
+        }
+        if (Array.isArray(savedData.submittedQuestionIds)) {
+          setSubmittedQuestionIds(savedData.submittedQuestionIds);
+        }
+        if (savedData.submittedAnswers) {
+          setSubmittedAnswers(savedData.submittedAnswers);
+        }
+
+        const now = Date.now();
+        // Check if reconnection occurred during the 8-second feedback period
+        if (
+          savedData.feedbackActiveForQuestionId &&
+          typeof savedData.feedbackEndsAtMs === 'number'
+        ) {
+          if (now < savedData.feedbackEndsAtMs) {
+            // Still within the 8-second window: restore feedback view & set timer for remaining ms
+            const qIndex = teamQuestions.findIndex((q) => q.id === savedData.feedbackActiveForQuestionId);
+            const resolvedIndex = qIndex !== -1 ? qIndex : Math.max(0, Math.min(savedData.currentQuestionIndex, teamQuestions.length - 1));
+            setCurrentQuestionIndex(resolvedIndex);
+            setIsAnswerSubmitted(true);
+            setIsFeedbackPeriodActive(true);
+
+            const remainingMs = Math.max(1000, savedData.feedbackEndsAtMs - now);
+            if (autoAdvanceTimeoutRef.current) {
+              clearTimeout(autoAdvanceTimeoutRef.current);
+            }
+            autoAdvanceTimeoutRef.current = setTimeout(() => {
+              advanceToNextQuestion();
+            }, remainingMs);
+          } else {
+            // 8-second feedback period elapsed while away: advance cleanly to the next question
+            const qIndex = teamQuestions.findIndex((q) => q.id === savedData.feedbackActiveForQuestionId);
+            const resolvedIndex = qIndex !== -1 ? qIndex : savedData.currentQuestionIndex;
+            const nextIndex = teamQuestions.length > 0 ? (resolvedIndex + 1) % teamQuestions.length : 0;
+            setCurrentQuestionIndex(nextIndex);
+            setIsAnswerSubmitted(false);
+            setIsFeedbackPeriodActive(false);
+            resetQuestionState();
+
+            // Save the resolved question position
+            const nextQ = teamQuestions[nextIndex];
+            if (nextQ) {
+              saveStudentDeviceProgress({
+                ...savedData,
+                currentQuestionIndex: nextIndex,
+                currentQuestionId: nextQ.id,
+                feedbackActiveForQuestionId: null,
+                feedbackEndsAtMs: null,
+                lastSavedAtMs: now,
+              });
+            }
+          }
+        } else {
+          // Standard question position restoration
+          let resolvedIndex = 0;
+          if (savedData.currentQuestionId) {
+            const idx = teamQuestions.findIndex((q) => q.id === savedData.currentQuestionId);
+            if (idx !== -1) {
+              resolvedIndex = idx;
+            } else if (typeof savedData.currentQuestionIndex === 'number') {
+              resolvedIndex = Math.max(0, Math.min(savedData.currentQuestionIndex, teamQuestions.length - 1));
+            }
+          } else if (typeof savedData.currentQuestionIndex === 'number') {
+            resolvedIndex = Math.max(0, Math.min(savedData.currentQuestionIndex, teamQuestions.length - 1));
+          }
+
+          setCurrentQuestionIndex(resolvedIndex);
+          const currentTargetQ = teamQuestions[resolvedIndex];
+          const isAlreadySubmitted = Boolean(currentTargetQ && savedData.submittedQuestionIds?.includes(currentTargetQ.id));
+          setIsAnswerSubmitted(isAlreadySubmitted);
+          setIsFeedbackPeriodActive(false);
+        }
+      }
+    }
+    setHasConfirmedReturningStudent(true);
+  };
+
+  // Returning student choice 2: Start over on this device only
+  // Clears ONLY vulture_student_team_locked, vulture_student_locked_team_id, vulture_reflection_drafts_v1,
+  // and this device's question-position checkpoint (vulture_student_progress_${teamId}).
+  // Keeps vulture_student_connected, does not touch server progress, shared posters, submissions or timer
+  const handleStartOverThisDeviceOnly = () => {
+    if (typeof window !== 'undefined') {
+      localStorage.removeItem('vulture_student_team_locked');
+      localStorage.removeItem('vulture_student_locked_team_id');
+      localStorage.removeItem('vulture_reflection_drafts_v1');
+      if (studentSelectedTeamId) {
+        localStorage.removeItem(getStudentProgressKey(studentSelectedTeamId));
+      }
+    }
+    if (autoAdvanceTimeoutRef.current) {
+      clearTimeout(autoAdvanceTimeoutRef.current);
+      autoAdvanceTimeoutRef.current = null;
+    }
+    setIsStudentTeamLocked(false);
+    setStudentSelectedTeamId(null);
+    setHasConfirmedReturningStudent(true);
+    setReflectionDrafts({});
+    setUserReflectionText('');
+    setScore(0);
+    setAnsweredCount(0);
+    setSubmittedQuestionIds([]);
+    setSubmittedAnswers({});
+    setCurrentQuestionIndex(0);
+    resetQuestionState();
   };
 
   // Safely adjust question index if active questions list updates (e.g., administrator deactivates question)
@@ -1272,6 +1588,52 @@ function isYouTubeUrl(url: string): boolean {
     savedReflections,
   ]);
 
+  // Check whether the student has made a valid selection/input for the current question
+  const isAnswerSelected = useMemo(() => {
+    if (!currentQ) return false;
+
+    switch (currentQ.type) {
+      case 'multiple_choice':
+        return userSingleChoice !== null && userSingleChoice !== '';
+      case 'multiple_choice_multi':
+        return Array.isArray(userMultiChoice) && userMultiChoice.length > 0;
+      case 'true_false':
+        return userTrueFalse !== null;
+      case 'text_matching': {
+        const pairs = (currentQ as TextMatchingQuestion).pairs;
+        // Require at least one pair to be matched by the student
+        return pairs && pairs.length > 0 && Object.keys(userMatches).length > 0;
+      }
+      case 'image_matching':
+        return userImageChoice !== null && userImageChoice !== '';
+      case 'qr_scan':
+        return userQrInput.trim().length > 0;
+      case 'photo_upload':
+      case 'video_upload':
+        if (isReflectionQuestion(currentQ)) {
+          return Boolean(
+            userUploadedFile ||
+            userReflectionText.trim().length > 0 ||
+            (savedReflections[currentQ.id]?.text && savedReflections[currentQ.id].text.trim().length > 0)
+          );
+        }
+        return Boolean(userUploadedFile);
+      default:
+        return true;
+    }
+  }, [
+    currentQ,
+    userSingleChoice,
+    userMultiChoice,
+    userTrueFalse,
+    userMatches,
+    userImageChoice,
+    userQrInput,
+    userUploadedFile,
+    userReflectionText,
+    savedReflections,
+  ]);
+
   const handleSubmitAnswer = () => {
     // Automatically stop accepting new answers when time expires
     if (isTimeExpired) {
@@ -1280,7 +1642,16 @@ function isYouTubeUrl(url: string): boolean {
     }
 
     // Prevent duplicate submissions and submissions while feedback/explanation is active
-    if (isAnswerSubmitted || isFeedbackPeriodActive) {
+    if (
+      isAnswerSubmitted ||
+      isFeedbackPeriodActive ||
+      Boolean(currentQ && submittedQuestionIds.includes(currentQ.id))
+    ) {
+      return;
+    }
+
+    // Require an answer to be selected before submitting
+    if (!isAnswerSelected) {
       return;
     }
 
@@ -1294,12 +1665,47 @@ function isYouTubeUrl(url: string): boolean {
       setScore(newScore);
     }
 
+    const updatedSubmittedIds = currentQ && !submittedQuestionIds.includes(currentQ.id)
+      ? [...submittedQuestionIds, currentQ.id]
+      : submittedQuestionIds;
+    setSubmittedQuestionIds(updatedSubmittedIds);
+
+    const updatedSubmittedAnswers: Record<string, SubmittedAnswerRecord> = {
+      ...submittedAnswers,
+      ...(currentQ
+        ? {
+            [currentQ.id]: {
+              isCorrect: isAnswerCorrect,
+              pointsAwarded,
+              submittedAtMs: Date.now(),
+            },
+          }
+        : {}),
+    };
+    setSubmittedAnswers(updatedSubmittedAnswers);
+
     if (currentQ) {
       const targetTeamId =
         (currentQ.assignedTeamIds && currentQ.assignedTeamIds[0]) || studentSelectedTeamId || 'team-characteristics';
 
       // Report progress to server for administrator live monitoring
       reportProgressToServer(targetTeamId, newAnswered, newScore);
+
+      // Save student progress checkpoint locally on device
+      if (!isAdminLoggedIn) {
+        saveStudentDeviceProgress({
+          teamId: targetTeamId,
+          currentQuestionIndex,
+          currentQuestionId: currentQ.id,
+          answeredCount: newAnswered,
+          score: newScore,
+          submittedQuestionIds: updatedSubmittedIds,
+          submittedAnswers: updatedSubmittedAnswers,
+          feedbackActiveForQuestionId: currentQ.id,
+          feedbackEndsAtMs: Date.now() + 8000,
+          lastSavedAtMs: Date.now(),
+        });
+      }
 
       // 1. If this is a reflection question: save reflection text to savedReflections and update the team's poster
       if (isReflectionQuestion(currentQ) && userReflectionText.trim()) {
@@ -1368,7 +1774,11 @@ function isYouTubeUrl(url: string): boolean {
           };
           const next = { ...prev, [targetTeamId]: updated };
           if (typeof window !== 'undefined') {
-            localStorage.setItem('vulture_posters_custom_v2', JSON.stringify(next));
+            try {
+              localStorage.setItem('vulture_posters_custom_v2', JSON.stringify(next));
+            } catch (storageErr) {
+              console.warn('LocalStorage quota reached when saving poster update, keeping in-memory:', storageErr);
+            }
           }
           return next;
         });
@@ -1596,8 +2006,22 @@ function isYouTubeUrl(url: string): boolean {
     return res;
   }, [posters, questions, teamPhotoSubmissions, savedReflections, language]);
 
-  // STUDENT FLOW GATE: If user is not an administrator, enforce access code, team selection, and waiting lobby
-  if (!isAdminLoggedIn && (!isStudentConnected || !isStudentTeamLocked || !isGameStarted)) {
+  // Determine whether the student's locked team has completed all its assigned activities
+  const isCurrentTeamActivitiesCompleted = useMemo(() => {
+    if (!studentSelectedTeamId) return false;
+    const teamAssignedQuestions = questions.filter(
+      (q) => q.isActive && q.assignedTeamIds.includes(studentSelectedTeamId)
+    );
+    const totalAssigned = teamAssignedQuestions.length;
+    if (totalAssigned === 0) return false;
+    return answeredCount >= totalAssigned;
+  }, [studentSelectedTeamId, questions, answeredCount]);
+
+  // STUDENT FLOW GATE: If user is not an administrator, enforce access code, team selection, returning student choice, and waiting lobby
+  if (
+    !isAdminLoggedIn &&
+    (!isStudentConnected || !isStudentTeamLocked || !isGameStarted || !hasConfirmedReturningStudent)
+  ) {
     return (
       <>
         <StudentEntryFlow
@@ -1613,6 +2037,9 @@ function isYouTubeUrl(url: string): boolean {
           onOpenAdminLogin={() => setIsAdminLoginOpen(true)}
           roomPin="GYPES-2026"
           durationMinutes={gameDurationMinutes}
+          isReturningStudent={isStudentTeamLocked && !hasConfirmedReturningStudent}
+          onContinueSession={handleContinueStudentSession}
+          onStartOverThisDeviceOnly={handleStartOverThisDeviceOnly}
         />
 
         {/* Admin Login Modal (Accessible from student flow) */}
@@ -1805,86 +2232,209 @@ function isYouTubeUrl(url: string): boolean {
         </div>
       )}
 
-      {/* Top Banner / Header with EXACT User-Requested Title */}
-      <header className="bg-stone-900 text-stone-100 border-b border-stone-800 sticky top-0 z-40 shadow-md">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-amber-600/30 border border-amber-500/50 flex items-center justify-center text-2xl shadow-inner">
-              🦅
+      {/* Top Banner / Header */}
+      {!isAdminLoggedIn ? (
+        /* Compact Student Active Gameplay Header: No large title/logo/desc, no admin login button, team identity once, single timer, language selector */
+        <header className="bg-stone-900 text-stone-100 border-b border-stone-800 sticky top-0 z-40 shadow-md">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 py-2.5 flex items-center justify-between gap-3">
+            {/* Team Identity - Displayed only once */}
+            <div className="flex items-center gap-2.5 min-w-0">
+              {studentSelectedTeamId ? (
+                (() => {
+                  const tm = teams.find((t) => t.id === studentSelectedTeamId);
+                  return (
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="text-2xl shrink-0">{tm?.avatar || '🦅'}</span>
+                      <div className="min-w-0">
+                        <span className="text-xs sm:text-sm font-black text-amber-400 truncate block">
+                          {language === 'el'
+                            ? `Ομάδα ${tm?.number || ''}: ${tm?.title || ''}`
+                            : `Team ${tm?.number || ''}: ${tm?.titleEn || tm?.title || ''}`}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })()
+              ) : (
+                <div className="flex items-center gap-2">
+                  <span className="text-2xl shrink-0">🦅</span>
+                  <span className="text-xs sm:text-sm font-black text-amber-400">
+                    {language === 'el' ? 'Ομάδα Πεδίου' : 'Field Team'}
+                  </span>
+                </div>
+              )}
             </div>
-            <div>
-              <div className="flex items-center gap-2">
-                {/* EXACT USER TITLE (supports EL / EN) */}
-                <h1 className="text-base sm:text-lg font-black tracking-tight text-white flex items-center gap-2">
-                  <span className="text-amber-400">{t.appTitleMain}</span>
-                  <span className="text-stone-400 font-light">-</span>
-                  <span>{t.appTitleSub}</span>
-                </h1>
-                <span className="text-[10px] font-bold bg-emerald-950 text-emerald-300 border border-emerald-700/60 px-2 py-0.5 rounded-full">
-                  {t.projectBadge}
-                </span>
+
+            {/* Center/Right: The SINGLE Countdown Timer & Language Toggle */}
+            <div className="flex items-center gap-2.5 sm:gap-3 shrink-0">
+              {/* Single Countdown Timer */}
+              {isGameStarted && gameEndsAtMs && (
+                <LiveGameTimer
+                  isStarted={isGameStarted}
+                  endsAtMs={gameEndsAtMs}
+                  serverClockOffsetMs={serverClockOffsetMs}
+                  language={language}
+                  size="sm"
+                  onExpire={() => {
+                    setIsTimeExpired(true);
+                    if (!hasDismissedExpiredModal) {
+                      setShowTimeExpiredModal(true);
+                    }
+                  }}
+                />
+              )}
+
+              {/* Poster Creation Shortcut - ONLY when team activities completed */}
+              {isCurrentTeamActivitiesCompleted && (
+                <button
+                  onClick={() => handleOpenCreatePoster()}
+                  className="px-2.5 py-1 bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs rounded-xl transition-all shadow-xs flex items-center gap-1 cursor-pointer"
+                >
+                  <Palette className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">{t.createPosterBtn}</span>
+                </button>
+              )}
+
+              {/* Compact Language Selector (ΕΛΛΗΝΙΚΑ / ENGLISH) */}
+              <div className="flex items-center bg-stone-950/80 border border-stone-700 rounded-xl p-0.5 shadow-2xs">
+                <button
+                  type="button"
+                  onClick={() => setLanguage('el')}
+                  className={`px-2.5 py-1 text-xs rounded-lg transition-all flex items-center gap-1 cursor-pointer ${
+                    language === 'el'
+                      ? 'bg-amber-500 text-stone-950 font-black shadow-xs'
+                      : 'text-stone-400 hover:text-stone-200'
+                  }`}
+                  title="Ελληνική Γλώσσα"
+                >
+                  <span>🇬🇷</span>
+                  <span className="font-extrabold text-[11px]">ΕΛ</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLanguage('en')}
+                  className={`px-2.5 py-1 text-xs rounded-lg transition-all flex items-center gap-1 cursor-pointer ${
+                    language === 'en'
+                      ? 'bg-amber-500 text-stone-950 font-black shadow-xs'
+                      : 'text-stone-400 hover:text-stone-200'
+                  }`}
+                  title="English Language"
+                >
+                  <span>🇬🇧</span>
+                  <span className="font-extrabold text-[11px]">EN</span>
+                </button>
               </div>
-              <p className="text-[11px] text-stone-400">
-                {language === 'el'
-                  ? `Διαδραστική Εκπαιδευτική Πλατφόρμα & Αρένα Γνώσεων • ${questions.length} Ερωτήσεις Πεδίου • 4 Ομάδες`
-                  : `Interactive Educational Platform & Arena • ${questions.length} Field Questions • 4 Teams`}
-              </p>
             </div>
           </div>
 
-          {/* Quick Actions & Language Selector Bar */}
-          <div className="flex flex-wrap items-center gap-2 sm:gap-2.5 text-xs">
-            {/* LANGUAGE SELECTOR (ΕΛΛΗΝΙΚΑ / ENGLISH - REQUESTED) */}
-            <div className="flex items-center bg-stone-950/80 border border-stone-700 rounded-xl p-0.5 shadow-2xs mr-1">
+          {/* Navigation Tabs for Students - Only when team activities are completed */}
+          {isCurrentTeamActivitiesCompleted && (
+            <div className="max-w-7xl mx-auto px-4 sm:px-6 flex gap-1 overflow-x-auto border-t border-stone-800/80 pt-1 text-xs sm:text-sm">
               <button
-                type="button"
-                onClick={() => setLanguage('el')}
-                className={`px-2.5 py-1 text-xs rounded-lg transition-all flex items-center gap-1 cursor-pointer ${
-                  language === 'el'
-                    ? 'bg-amber-500 text-stone-950 font-black shadow-xs'
-                    : 'text-stone-400 hover:text-stone-200'
+                onClick={() => setActiveTab('arena')}
+                className={`flex items-center gap-1.5 px-3.5 py-2 font-medium border-b-2 transition-colors whitespace-nowrap cursor-pointer ${
+                  activeTab === 'arena'
+                    ? 'border-amber-500 text-amber-400 bg-stone-800/50 rounded-t-lg font-bold'
+                    : 'border-transparent text-stone-400 hover:text-stone-200'
                 }`}
-                title="Ελληνική Γλώσσα"
               >
-                <span>🇬🇷</span>
-                <span className="font-extrabold">ΕΛ</span>
+                <Compass className="w-4 h-4" />
+                {t.tabArena}
               </button>
               <button
-                type="button"
-                onClick={() => setLanguage('en')}
-                className={`px-2.5 py-1 text-xs rounded-lg transition-all flex items-center gap-1 cursor-pointer ${
-                  language === 'en'
-                    ? 'bg-amber-500 text-stone-950 font-black shadow-xs'
-                    : 'text-stone-400 hover:text-stone-200'
+                onClick={() => setActiveTab('posters')}
+                className={`flex items-center gap-1.5 px-3.5 py-2 font-medium border-b-2 transition-colors whitespace-nowrap cursor-pointer ${
+                  activeTab === 'posters'
+                    ? 'border-amber-500 text-amber-400 bg-stone-800/50 rounded-t-lg font-bold'
+                    : 'border-transparent text-stone-400 hover:text-stone-200'
                 }`}
-                title="English Language"
               >
-                <span>🇬🇧</span>
-                <span className="font-extrabold">EN</span>
+                <Palette className="w-4 h-4" />
+                {t.tabPosters}
               </button>
             </div>
+          )}
+        </header>
+      ) : (
+        /* Full Administrator Header with EXACT User-Requested Title, controls, and tabs */
+        <header className="bg-stone-900 text-stone-100 border-b border-stone-800 sticky top-0 z-40 shadow-md">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-amber-600/30 border border-amber-500/50 flex items-center justify-center text-2xl shadow-inner">
+                🦅
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  {/* EXACT USER TITLE (supports EL / EN) */}
+                  <h1 className="text-base sm:text-lg font-black tracking-tight text-white flex items-center gap-2">
+                    <span className="text-amber-400">{t.appTitleMain}</span>
+                    <span className="text-stone-400 font-light">-</span>
+                    <span>{t.appTitleSub}</span>
+                  </h1>
+                  <span className="text-[10px] font-bold bg-emerald-950 text-emerald-300 border border-emerald-700/60 px-2 py-0.5 rounded-full">
+                    {t.projectBadge}
+                  </span>
+                </div>
+                <p className="text-[11px] text-stone-400">
+                  {language === 'el'
+                    ? `Διαδραστική Εκπαιδευτική Πλατφόρμα & Αρένα Γνώσεων • ${questions.length} Ερωτήσεις Πεδίου • 4 Ομάδες`
+                    : `Interactive Educational Platform & Arena • ${questions.length} Field Questions • 4 Teams`}
+                </p>
+              </div>
+            </div>
 
-            {/* 1. DEDICATED QR CODE BUTTON FOR CONNECTION */}
-            <button
-              onClick={() => setIsJoinQROpen(true)}
-              className="px-3.5 py-1.5 bg-linear-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-extrabold rounded-xl transition-all shadow-md flex items-center gap-1.5 ring-2 ring-emerald-400/30 cursor-pointer"
-              title={t.joinQrTooltip}
-            >
-              <QrCode className="w-4 h-4 text-emerald-200" />
-              <span>{t.joinQrBtn}</span>
-            </button>
+            {/* Quick Actions & Language Selector Bar */}
+            <div className="flex flex-wrap items-center gap-2 sm:gap-2.5 text-xs">
+              {/* LANGUAGE SELECTOR (ΕΛΛΗΝΙΚΑ / ENGLISH - REQUESTED) */}
+              <div className="flex items-center bg-stone-950/80 border border-stone-700 rounded-xl p-0.5 shadow-2xs mr-1">
+                <button
+                  type="button"
+                  onClick={() => setLanguage('el')}
+                  className={`px-2.5 py-1 text-xs rounded-lg transition-all flex items-center gap-1 cursor-pointer ${
+                    language === 'el'
+                      ? 'bg-amber-500 text-stone-950 font-black shadow-xs'
+                      : 'text-stone-400 hover:text-stone-200'
+                  }`}
+                  title="Ελληνική Γλώσσα"
+                >
+                  <span>🇬🇷</span>
+                  <span className="font-extrabold">ΕΛ</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLanguage('en')}
+                  className={`px-2.5 py-1 text-xs rounded-lg transition-all flex items-center gap-1 cursor-pointer ${
+                    language === 'en'
+                      ? 'bg-amber-500 text-stone-950 font-black shadow-xs'
+                      : 'text-stone-400 hover:text-stone-200'
+                  }`}
+                  title="English Language"
+                >
+                  <span>🇬🇧</span>
+                  <span className="font-extrabold">EN</span>
+                </button>
+              </div>
 
-            {/* Quick Action: Create Poster */}
-            <button
-              onClick={() => handleOpenCreatePoster()}
-              className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white font-bold rounded-xl transition-all shadow-xs flex items-center gap-1.5 cursor-pointer"
-            >
-              <Palette className="w-3.5 h-3.5" />
-              <span>{t.createPosterBtn}</span>
-            </button>
+              {/* 1. DEDICATED QR CODE BUTTON FOR CONNECTION (Admin only) */}
+              <button
+                onClick={() => setIsJoinQROpen(true)}
+                className="px-3.5 py-1.5 bg-linear-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-extrabold rounded-xl transition-all shadow-md flex items-center gap-1.5 ring-2 ring-emerald-400/30 cursor-pointer"
+                title={t.joinQrTooltip}
+              >
+                <QrCode className="w-4 h-4 text-emerald-200" />
+                <span>{t.joinQrBtn}</span>
+              </button>
 
-            {/* Quick Action: Teacher Presentation Mode (Admin) */}
-            {isAdminLoggedIn && (
+              {/* Quick Action: Create Poster */}
+              <button
+                onClick={() => handleOpenCreatePoster()}
+                className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white font-bold rounded-xl transition-all shadow-xs flex items-center gap-1.5 cursor-pointer"
+              >
+                <Palette className="w-3.5 h-3.5" />
+                <span>{t.createPosterBtn}</span>
+              </button>
+
+              {/* Quick Action: Teacher Presentation Mode (Admin) */}
               <button
                 onClick={() => handleOpenPresentation(0)}
                 className="px-3 py-1.5 bg-stone-800 hover:bg-stone-700 text-stone-200 font-semibold rounded-xl border border-stone-700 transition-colors flex items-center gap-1.5 cursor-pointer"
@@ -1893,10 +2443,8 @@ function isYouTubeUrl(url: string): boolean {
                 <Tv className="w-3.5 h-3.5 text-amber-400" />
                 <span className="hidden sm:inline">{t.presentationBtn}</span>
               </button>
-            )}
 
-            {/* Quick Action: Admin Reports (Admin) */}
-            {isAdminLoggedIn && (
+              {/* Quick Action: Admin Reports (Admin) */}
               <button
                 onClick={() => setIsAdminReportOpen(true)}
                 className="px-2.5 py-1.5 bg-stone-800 hover:bg-stone-700 text-stone-300 font-semibold rounded-xl border border-stone-700 transition-colors flex items-center gap-1.5 cursor-pointer"
@@ -1905,53 +2453,34 @@ function isYouTubeUrl(url: string): boolean {
                 <FileSpreadsheet className="w-3.5 h-3.5 text-purple-400" />
                 <span className="hidden md:inline">{t.reportsBtn}</span>
               </button>
-            )}
 
-            {/* 2. DEDICATED ADMIN LOGIN / EDIT BUTTON */}
-            <button
-              onClick={() => {
-                if (isAdminLoggedIn) {
+              {/* 2. DEDICATED ADMIN LOGIN / EDIT BUTTON */}
+              <button
+                onClick={() => {
                   setActiveTab('pool');
-                } else {
-                  setIsAdminLoginOpen(true);
-                }
-              }}
-              className={`px-3 py-1.5 rounded-xl font-bold transition-all flex items-center gap-1.5 border cursor-pointer ${
-                isAdminLoggedIn
-                  ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 hover:bg-amber-500/30'
-                  : 'bg-stone-800 text-stone-200 border-stone-700 hover:bg-stone-700'
-              }`}
-              title={isAdminLoggedIn ? t.adminLoggedInTooltip : t.adminLoginTooltip}
-            >
-              {isAdminLoggedIn ? (
-                <>
-                  <Unlock className="w-3.5 h-3.5 text-amber-400" />
-                  <span>{t.adminBtn}</span>
-                </>
-              ) : (
-                <>
-                  <Lock className="w-3.5 h-3.5 text-stone-400" />
-                  <span>{t.adminBtn}</span>
-                </>
-              )}
-            </button>
+                }}
+                className="px-3 py-1.5 rounded-xl font-bold transition-all flex items-center gap-1.5 border cursor-pointer bg-amber-500/20 text-amber-300 border-amber-500/40 hover:bg-amber-500/30"
+                title={t.adminLoggedInTooltip}
+              >
+                <Unlock className="w-3.5 h-3.5 text-amber-400" />
+                <span>{t.adminBtn}</span>
+              </button>
+            </div>
           </div>
-        </div>
 
-        {/* Navigation Tabs */}
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 flex gap-1 overflow-x-auto border-t border-stone-800/80 pt-1 text-xs sm:text-sm">
-          <button
-            onClick={() => setActiveTab('arena')}
-            className={`flex items-center gap-1.5 px-3.5 py-2 font-medium border-b-2 transition-colors whitespace-nowrap cursor-pointer ${
-              activeTab === 'arena'
-                ? 'border-amber-500 text-amber-400 bg-stone-800/50 rounded-t-lg font-bold'
-                : 'border-transparent text-stone-400 hover:text-stone-200'
-            }`}
-          >
-            <Compass className="w-4 h-4" />
-            {t.tabArena}
-          </button>
-          {isAdminLoggedIn && (
+          {/* Navigation Tabs for Administrators */}
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 flex gap-1 overflow-x-auto border-t border-stone-800/80 pt-1 text-xs sm:text-sm">
+            <button
+              onClick={() => setActiveTab('arena')}
+              className={`flex items-center gap-1.5 px-3.5 py-2 font-medium border-b-2 transition-colors whitespace-nowrap cursor-pointer ${
+                activeTab === 'arena'
+                  ? 'border-amber-500 text-amber-400 bg-stone-800/50 rounded-t-lg font-bold'
+                  : 'border-transparent text-stone-400 hover:text-stone-200'
+              }`}
+            >
+              <Compass className="w-4 h-4" />
+              {t.tabArena}
+            </button>
             <button
               onClick={() => setActiveTab('pool')}
               className={`flex items-center gap-1.5 px-3.5 py-2 font-bold border-b-2 transition-colors whitespace-nowrap cursor-pointer ${
@@ -1966,19 +2495,17 @@ function isYouTubeUrl(url: string): boolean {
                 {activeCount} {language === 'el' ? 'ενεργές' : 'active'}
               </span>
             </button>
-          )}
-          <button
-            onClick={() => setActiveTab('posters')}
-            className={`flex items-center gap-1.5 px-3.5 py-2 font-medium border-b-2 transition-colors whitespace-nowrap cursor-pointer ${
-              activeTab === 'posters'
-                ? 'border-amber-500 text-amber-400 bg-stone-800/50 rounded-t-lg font-bold'
-                : 'border-transparent text-stone-400 hover:text-stone-200'
-            }`}
-          >
-            <Palette className="w-4 h-4" />
-            {t.tabPosters}
-          </button>
-          {isAdminLoggedIn && (
+            <button
+              onClick={() => setActiveTab('posters')}
+              className={`flex items-center gap-1.5 px-3.5 py-2 font-medium border-b-2 transition-colors whitespace-nowrap cursor-pointer ${
+                activeTab === 'posters'
+                  ? 'border-amber-500 text-amber-400 bg-stone-800/50 rounded-t-lg font-bold'
+                  : 'border-transparent text-stone-400 hover:text-stone-200'
+              }`}
+            >
+              <Palette className="w-4 h-4" />
+              {t.tabPosters}
+            </button>
             <button
               onClick={() => setActiveTab('teams')}
               className={`flex items-center gap-1.5 px-3.5 py-2 font-medium border-b-2 transition-colors whitespace-nowrap cursor-pointer ${
@@ -1990,8 +2517,6 @@ function isYouTubeUrl(url: string): boolean {
               <Users className="w-4 h-4" />
               {t.tabTeams}
             </button>
-          )}
-          {isAdminLoggedIn && (
             <button
               onClick={() => setActiveTab('guide')}
               className={`flex items-center gap-1.5 px-3.5 py-2 font-medium border-b-2 transition-colors whitespace-nowrap cursor-pointer ${
@@ -2003,12 +2528,12 @@ function isYouTubeUrl(url: string): boolean {
               <BookOpen className="w-4 h-4" />
               {t.tabGuide}
             </button>
-          )}
-        </div>
-      </header>
+          </div>
+        </header>
+      )}
 
       {/* Main Content Area */}
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6 w-full flex-1">
+      <main className={`max-w-7xl mx-auto px-3 sm:px-6 ${isAdminLoggedIn ? 'py-6' : 'py-3 sm:py-4'} w-full flex-1`}>
         {/* TAB 1: QUESTION POOL MANAGER (WITH INLINE TEAM SELECTOR, ACTIVE TOGGLES, AND UP/DOWN ARROWS) */}
         {activeTab === 'pool' && (
           <div className="space-y-6">
@@ -2214,7 +2739,7 @@ function isYouTubeUrl(url: string): boolean {
 
         {/* TAB 2: PLAY ARENA */}
         {activeTab === 'arena' && (
-          <div className="space-y-6">
+          <div className={isAdminLoggedIn ? "space-y-6" : "space-y-3 sm:space-y-4"}>
             {/* Administrator Simultaneous Game Control Card */}
             {isAdminLoggedIn && (
               <div
@@ -2466,36 +2991,38 @@ function isYouTubeUrl(url: string): boolean {
               </div>
             )}
 
-            {/* Quick Join QR Banner */}
-            <div className="p-4 bg-linear-to-r from-emerald-600/10 via-teal-600/15 to-emerald-600/10 rounded-3xl border border-emerald-300 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-2xs">
-              <div className="flex items-center gap-3">
-                <div className="w-11 h-11 rounded-2xl bg-emerald-600 text-white flex items-center justify-center text-2xl shrink-0 shadow-xs">
-                  📱
+            {/* Quick Join QR Banner (Admin only) */}
+            {isAdminLoggedIn && (
+              <div className="p-4 bg-linear-to-r from-emerald-600/10 via-teal-600/15 to-emerald-600/10 rounded-3xl border border-emerald-300 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-2xs">
+                <div className="flex items-center gap-3">
+                  <div className="w-11 h-11 rounded-2xl bg-emerald-600 text-white flex items-center justify-center text-2xl shrink-0 shadow-xs">
+                    📱
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-emerald-950 flex items-center gap-2">
+                      <span>{t.qrCalloutTitle}</span>
+                      <span className="text-[10px] bg-emerald-200 text-emerald-900 font-bold px-2 py-0.5 rounded-full">
+                        Live
+                      </span>
+                    </h3>
+                    <p className="text-xs text-stone-600">
+                      {t.qrCalloutDesc}
+                    </p>
+                  </div>
                 </div>
-                <div>
-                  <h3 className="text-sm font-bold text-emerald-950 flex items-center gap-2">
-                    <span>{t.qrCalloutTitle}</span>
-                    <span className="text-[10px] bg-emerald-200 text-emerald-900 font-bold px-2 py-0.5 rounded-full">
-                      Live
-                    </span>
-                  </h3>
-                  <p className="text-xs text-stone-600">
-                    {t.qrCalloutDesc}
-                  </p>
-                </div>
+
+                <button
+                  onClick={() => setIsJoinQROpen(true)}
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-xs transition-colors flex items-center justify-center gap-1.5 shrink-0 cursor-pointer"
+                >
+                  <QrCode className="w-4 h-4" />
+                  {t.openQrBtn}
+                </button>
               </div>
+            )}
 
-              <button
-                onClick={() => setIsJoinQROpen(true)}
-                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-xs transition-colors flex items-center justify-center gap-1.5 shrink-0 cursor-pointer"
-              >
-                <QrCode className="w-4 h-4" />
-                {t.openQrBtn}
-              </button>
-            </div>
-
-            {/* Quest Completion Callout for Poster Creation */}
-            {answeredCount > 0 && (
+            {/* Quest Completion Callout for Poster Creation (Visible when all team activities completed or admin) */}
+            {(isAdminLoggedIn || isCurrentTeamActivitiesCompleted) && answeredCount > 0 && (
               <div className="p-4 bg-linear-to-r from-amber-500/10 via-amber-500/20 to-emerald-500/10 rounded-2xl border border-amber-300 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-2xs">
                 <div className="flex items-center gap-3">
                   <div className="w-10 h-10 rounded-xl bg-amber-500 text-white flex items-center justify-center text-xl shrink-0">
@@ -2521,8 +3048,8 @@ function isYouTubeUrl(url: string): boolean {
               </div>
             )}
 
-            {/* STUDENT LIVE SYNCHRONIZED COUNTDOWN & MISSION STATUS */}
-            {isGameStarted && gameEndsAtMs && (
+            {/* STUDENT LIVE SYNCHRONIZED COUNTDOWN & MISSION STATUS (Shown in full for Administrator) */}
+            {isAdminLoggedIn && isGameStarted && gameEndsAtMs && (
               <div className="bg-stone-900 text-white rounded-3xl p-4 sm:p-5 border-2 border-amber-500/50 shadow-xl flex flex-wrap items-center justify-between gap-4 sticky top-14 z-30 backdrop-blur-md">
                 <div className="flex items-center gap-3.5">
                   <div className="w-11 h-11 rounded-2xl bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-2xl shrink-0 shadow-inner">
@@ -2546,7 +3073,7 @@ function isYouTubeUrl(url: string): boolean {
                 </div>
 
                 <div className="flex items-center gap-4">
-                  {/* Current Points & Progress */}
+                  {/* Current Points & Progress (Admin only during gameplay) */}
                   <div className="text-right hidden sm:block">
                     <span className="text-[10px] text-stone-400 uppercase font-bold block">
                       {language === 'en' ? 'Points Earned' : 'Συνολικοί Πόντοι'}
@@ -2574,23 +3101,15 @@ function isYouTubeUrl(url: string): boolean {
               </div>
             )}
 
-            {/* Filter & Selector Bar */}
-            <div className="bg-white p-4 rounded-2xl border border-stone-200 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
-              <div className="flex flex-wrap items-center gap-3">
-                <span className="text-xs font-semibold uppercase tracking-wider text-stone-500 flex items-center gap-1.5">
-                  <Filter className="w-3.5 h-3.5" /> {t.filterTeam}
-                </span>
-                {!isAdminLoggedIn && isStudentTeamLocked && studentSelectedTeamId ? (
-                  <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-amber-100 text-amber-950 border border-amber-300 shadow-2xs">
-                    <Lock className="w-3.5 h-3.5 text-amber-700" />
-                    <span>
-                      {teams.find((t) => t.id === studentSelectedTeamId)?.avatar}{' '}
-                      {language === 'el'
-                        ? `Κλειδωμένη Ομάδα: ${teams.find((t) => t.id === studentSelectedTeamId)?.title}`
-                        : `Locked Team: ${teams.find((t) => t.id === studentSelectedTeamId)?.titleEn || teams.find((t) => t.id === studentSelectedTeamId)?.title}`}
-                    </span>
+            {/* Filter & Navigation Bar */}
+            <div className={`bg-white rounded-2xl border border-stone-200 shadow-sm flex items-center justify-between gap-3 ${
+              isAdminLoggedIn ? 'p-4 flex-col md:flex-row' : 'px-4 py-2.5'
+            }`}>
+              {isAdminLoggedIn ? (
+                <div className="flex flex-wrap items-center gap-3">
+                  <span className="text-xs font-semibold uppercase tracking-wider text-stone-500 flex items-center gap-1.5">
+                    <Filter className="w-3.5 h-3.5" /> {t.filterTeam}
                   </span>
-                ) : (
                   <select
                     value={selectedTeamFilter}
                     onChange={(e) => {
@@ -2610,39 +3129,50 @@ function isYouTubeUrl(url: string): boolean {
                       </option>
                     ))}
                   </select>
+
+                  <select
+                    value={selectedTypeFilter}
+                    disabled={!isAdminLoggedIn && isFeedbackPeriodActive}
+                    onChange={(e) => {
+                      setSelectedTypeFilter(e.target.value);
+                      setCurrentQuestionIndex(0);
+                      resetQuestionState();
+                    }}
+                    className={`text-xs sm:text-sm bg-stone-100 border border-stone-300 rounded-lg px-3 py-1.5 font-medium text-stone-800 focus:outline-none focus:ring-2 focus:ring-amber-500 ${
+                      !isAdminLoggedIn && isFeedbackPeriodActive ? 'opacity-50 cursor-not-allowed' : ''
+                    }`}
+                  >
+                    <option value="all">{t.allQuestionTypes}</option>
+                    <option value="multiple_choice">{t.type_multiple_choice}</option>
+                    <option value="multiple_choice_multi">{t.type_multiple_choice_multi}</option>
+                    <option value="true_false">{t.type_true_false}</option>
+                    <option value="text_matching">{t.type_text_matching}</option>
+                    <option value="image_matching">{t.type_image_matching}</option>
+                    <option value="qr_scan">{t.type_qr_scan}</option>
+                    <option value="photo_upload">{t.type_photo_upload}</option>
+                    <option value="video_upload">{t.type_video_upload}</option>
+                  </select>
+                </div>
+              ) : (
+                /* Student: Clear, prominent Question X of Y indicator */
+                <div className="flex items-center gap-2">
+                  <span className="text-xs sm:text-sm font-bold text-stone-800 bg-amber-50 border border-amber-200 px-3 py-1 rounded-xl">
+                    {t.questionOf
+                      .replace('{current}', String(activeQuestions.length > 0 ? currentQuestionIndex + 1 : 0))
+                      .replace('{total}', String(activeQuestions.length))}
+                  </span>
+                </div>
+              )}
+
+              {/* Arena Navigation Counter & Buttons */}
+              <div className="flex items-center justify-between md:justify-end gap-3 ml-auto">
+                {isAdminLoggedIn && (
+                  <span className="text-xs text-stone-500">
+                    {t.questionOf
+                      .replace('{current}', String(activeQuestions.length > 0 ? currentQuestionIndex + 1 : 0))
+                      .replace('{total}', String(activeQuestions.length))}
+                  </span>
                 )}
-
-                <select
-                  value={selectedTypeFilter}
-                  disabled={!isAdminLoggedIn && isFeedbackPeriodActive}
-                  onChange={(e) => {
-                    setSelectedTypeFilter(e.target.value);
-                    setCurrentQuestionIndex(0);
-                    resetQuestionState();
-                  }}
-                  className={`text-xs sm:text-sm bg-stone-100 border border-stone-300 rounded-lg px-3 py-1.5 font-medium text-stone-800 focus:outline-none focus:ring-2 focus:ring-amber-500 ${
-                    !isAdminLoggedIn && isFeedbackPeriodActive ? 'opacity-50 cursor-not-allowed' : ''
-                  }`}
-                >
-                  <option value="all">{t.allQuestionTypes}</option>
-                  <option value="multiple_choice">{t.type_multiple_choice}</option>
-                  <option value="multiple_choice_multi">{t.type_multiple_choice_multi}</option>
-                  <option value="true_false">{t.type_true_false}</option>
-                  <option value="text_matching">{t.type_text_matching}</option>
-                  <option value="image_matching">{t.type_image_matching}</option>
-                  <option value="qr_scan">{t.type_qr_scan}</option>
-                  <option value="photo_upload">{t.type_photo_upload}</option>
-                  <option value="video_upload">{t.type_video_upload}</option>
-                </select>
-              </div>
-
-              {/* Arena Navigation Counter */}
-              <div className="flex items-center justify-between md:justify-end gap-3">
-                <span className="text-xs text-stone-500">
-                  {t.questionOf
-                    .replace('{current}', String(activeQuestions.length > 0 ? currentQuestionIndex + 1 : 0))
-                    .replace('{total}', String(activeQuestions.length))}
-                </span>
                 <div className="flex items-center gap-1.5">
                   <button
                     onClick={handlePrevQuestion}
@@ -2675,26 +3205,28 @@ function isYouTubeUrl(url: string): boolean {
               const activeQ = localizedCurrentQ || currentQ;
               return (
               <div className="bg-white rounded-3xl border border-stone-200 shadow-sm overflow-hidden transition-all">
-                {/* Header Strip */}
-                <div className="bg-stone-50 border-b border-stone-200 px-6 py-4 flex flex-wrap items-center justify-between gap-3">
+                {/* Header Strip - Streamlined for students, full metadata preserved for administrators */}
+                <div className="bg-stone-50 border-b border-stone-200 px-4 sm:px-6 py-3 flex flex-wrap items-center justify-between gap-3">
                   <div className="flex flex-wrap items-center gap-2">
                     {renderTypeBadge(activeQ.type)}
-                    {activeQ.missionTitle && (
+                    {isAdminLoggedIn && activeQ.missionTitle && (
                       <span className="text-xs font-black px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-300 flex items-center gap-1">
                         <Target className="w-3 h-3 text-amber-700" />
                         <span>{activeQ.missionTitle}</span>
                       </span>
                     )}
-                    <span className="text-xs font-bold px-2.5 py-0.5 rounded-full bg-amber-50 text-amber-900 border border-amber-200">
-                      +{activeQ.points} {language === 'el' ? 'Πόντοι' : 'Points'}
-                    </span>
+                    {isAdminLoggedIn && (
+                      <span className="text-xs font-bold px-2.5 py-0.5 rounded-full bg-amber-50 text-amber-900 border border-amber-200">
+                        +{activeQ.points} {language === 'el' ? 'Πόντοι' : 'Points'}
+                      </span>
+                    )}
                     {activeQ.mediaUrl && (
                       <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-blue-50 text-blue-800 border border-blue-200 flex items-center gap-1">
                         {activeQ.mediaType === 'video' ? <Video className="w-3 h-3 text-blue-600" /> : <Camera className="w-3 h-3 text-blue-600" />}
                         {activeQ.mediaType === 'video' ? t.mediaTypeVideo : t.mediaTypeImage}
                       </span>
                     )}
-                    {activeQ.locationFocus && (
+                    {isAdminLoggedIn && activeQ.locationFocus && (
                       <span className="text-xs px-2 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200 flex items-center gap-1">
                         <MapPin className="w-3 h-3" />
                         {activeQ.locationFocus === 'Cyprus' ? (language === 'el' ? 'Κύπρος' : 'Cyprus') : activeQ.locationFocus === 'Greece' ? (language === 'el' ? 'Ελλάδα' : 'Greece') : (language === 'el' ? 'Κύπρος & Ελλάδα' : 'Cyprus & Greece')}
@@ -2711,8 +3243,8 @@ function isYouTubeUrl(url: string): boolean {
                       </button>
                     )}
 
-                    {/* Live Synchronized Countdown inside Question Header */}
-                    {isGameStarted && gameEndsAtMs && (
+                    {/* Admin Live Synchronized Countdown inside Question Header */}
+                    {isAdminLoggedIn && isGameStarted && gameEndsAtMs && (
                       <LiveGameTimer
                         isStarted={isGameStarted}
                         endsAtMs={gameEndsAtMs}
@@ -2727,31 +3259,33 @@ function isYouTubeUrl(url: string): boolean {
                     )}
                   </div>
 
-                  {/* Assigned Teams Badges */}
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-xs text-stone-400">{language === 'el' ? 'Ομάδα:' : 'Team:'}</span>
-                    {activeQ.assignedTeamIds.map((teamId) => {
-                      const tm = teams.find((item) => item.id === teamId);
-                      return tm ? (
-                        <span
-                          key={tm.id}
-                          className={`text-xs px-2.5 py-0.5 rounded-md font-semibold border ${tm.badgeColor}`}
-                          title={language === 'en' ? (tm.sloganEn || tm.slogan) : tm.slogan}
-                        >
-                          {tm.avatar} {language === 'en' ? (tm.titleEn || tm.title) : tm.title}
-                        </span>
-                      ) : null;
-                    })}
-                  </div>
+                  {/* Assigned Teams Badges - Admin only to avoid duplication for students */}
+                  {isAdminLoggedIn && (
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-xs text-stone-400">{language === 'el' ? 'Ομάδα:' : 'Team:'}</span>
+                      {activeQ.assignedTeamIds.map((teamId) => {
+                        const tm = teams.find((item) => item.id === teamId);
+                        return tm ? (
+                          <span
+                            key={tm.id}
+                            className={`text-xs px-2.5 py-0.5 rounded-md font-semibold border ${tm.badgeColor}`}
+                            title={language === 'en' ? (tm.sloganEn || tm.slogan) : tm.slogan}
+                          >
+                            {tm.avatar} {language === 'en' ? (tm.titleEn || tm.title) : tm.title}
+                          </span>
+                        ) : null;
+                      })}
+                    </div>
+                  )}
                 </div>
 
                 {/* Question Body */}
-                <div className="p-6 sm:p-8 space-y-6">
+                <div className={`space-y-5 sm:space-y-6 ${isAdminLoggedIn ? 'p-6 sm:p-8' : 'p-4 sm:p-6'}`}>
                   <div>
                     {activeQ.missionTitle && (
                       <div className="inline-flex items-center gap-1.5 px-3 py-1 bg-amber-50 border border-amber-200 text-amber-900 rounded-xl text-xs font-black uppercase tracking-wider mb-2.5">
                         <Target className="w-3.5 h-3.5 text-amber-600" />
-                        <span>{language === 'el' ? 'Τίτλος Αποστολής: ' : 'Mission Title: '}{activeQ.missionTitle}</span>
+                        <span>{language === 'el' ? 'Αποστολή: ' : 'Mission: '}{activeQ.missionTitle}</span>
                       </div>
                     )}
                     <h2 className="text-xl sm:text-2xl font-bold text-stone-900 leading-snug">
@@ -3236,34 +3770,59 @@ function isYouTubeUrl(url: string): boolean {
 
                       <div className="space-y-3">
                         <div className="flex flex-wrap items-center gap-3">
-                          <label className={`inline-flex items-center gap-2 px-4 py-2 bg-teal-600 hover:bg-teal-700 text-white rounded-xl text-xs font-semibold transition-colors shadow-2xs ${
+                          {/* Option 1: Take Photo directly via device camera */}
+                          <label className={`inline-flex items-center gap-2 px-4 py-2.5 bg-teal-600 hover:bg-teal-700 text-white rounded-xl text-xs font-semibold transition-colors shadow-2xs ${
                             isAnswerSubmitted ? 'opacity-50 cursor-not-allowed pointer-events-none' : 'cursor-pointer'
                           }`}>
                             <Camera className="w-4 h-4" />
-                            {userUploadedFile ? t.changePhoto : t.choosePhoto}
+                            <span>{t.takePhoto}</span>
+                            <input
+                              type="file"
+                              accept="image/*"
+                              capture="user"
+                              disabled={isAnswerSubmitted}
+                              className="hidden"
+                              onChange={async (e) => {
+                                if (e.target.files && e.target.files[0]) {
+                                  const file = e.target.files[0];
+                                  const compressedDataUrl = await compressAndResizeImage(file, 1200, 0.82);
+                                  if (compressedDataUrl) {
+                                    setUserUploadedDataUrl(compressedDataUrl);
+                                    setUserUploadedFile(file.name || 'camera-capture.jpg');
+                                  }
+                                }
+                              }}
+                            />
+                          </label>
+
+                          {/* Option 2: Choose from Gallery */}
+                          <label className={`inline-flex items-center gap-2 px-4 py-2.5 bg-stone-700 hover:bg-stone-800 text-white rounded-xl text-xs font-semibold transition-colors shadow-2xs ${
+                            isAnswerSubmitted ? 'opacity-50 cursor-not-allowed pointer-events-none' : 'cursor-pointer'
+                          }`}>
+                            <ImageIcon className="w-4 h-4" />
+                            <span>{t.chooseFromGallery}</span>
                             <input
                               type="file"
                               accept="image/*"
                               disabled={isAnswerSubmitted}
                               className="hidden"
-                              onChange={(e) => {
+                              onChange={async (e) => {
                                 if (e.target.files && e.target.files[0]) {
                                   const file = e.target.files[0];
-                                  const reader = new FileReader();
-                                  reader.onload = (uploadEv) => {
-                                    if (uploadEv.target?.result) {
-                                      setUserUploadedDataUrl(uploadEv.target.result as string);
-                                      setUserUploadedFile(file.name);
-                                    }
-                                  };
-                                  reader.readAsDataURL(file);
+                                  const compressedDataUrl = await compressAndResizeImage(file, 1200, 0.82);
+                                  if (compressedDataUrl) {
+                                    setUserUploadedDataUrl(compressedDataUrl);
+                                    setUserUploadedFile(file.name);
+                                  }
                                 }
                               }}
                             />
                           </label>
+
                           {userUploadedFile && (
-                            <span className="text-xs font-semibold text-teal-800 bg-teal-100 px-3 py-1 rounded-full border border-teal-200">
-                              {t.selectedFile} {userUploadedFile}
+                            <span className="text-xs font-semibold text-teal-800 bg-teal-100 px-3 py-1.5 rounded-full border border-teal-200 flex items-center gap-1.5">
+                              <Check className="w-3.5 h-3.5 text-teal-600" />
+                              <span>{t.selectedFile} {userUploadedFile}</span>
                             </span>
                           )}
                         </div>
@@ -3354,35 +3913,50 @@ function isYouTubeUrl(url: string): boolean {
                   {/* Submission & Action Bar */}
                   <div className="pt-4 border-t border-stone-200 flex flex-wrap items-center justify-between gap-4">
                     <button
-                      disabled={isAnswerSubmitted || isTimeExpired || (!isAdminLoggedIn && isFeedbackPeriodActive)}
+                      disabled={
+                        isAnswerSubmitted ||
+                        isTimeExpired ||
+                        (!isAdminLoggedIn && isFeedbackPeriodActive) ||
+                        !isAnswerSelected ||
+                        Boolean(currentQ && submittedQuestionIds.includes(currentQ.id))
+                      }
                       onClick={handleSubmitAnswer}
+                      title={
+                        !isAnswerSubmitted && !isAnswerSelected && !Boolean(currentQ && submittedQuestionIds.includes(currentQ.id))
+                          ? (language === 'en' ? 'Please select or provide an answer first' : 'Παρακαλούμε επιλέξτε πρώτα μία απάντηση')
+                          : undefined
+                      }
                       className={`px-6 py-3 font-bold text-sm sm:text-base rounded-xl transition-all shadow-md flex items-center gap-2 cursor-pointer ${
                         isTimeExpired
                           ? 'bg-stone-400 text-stone-200 cursor-not-allowed'
-                          : isAnswerSubmitted
+                          : (isAnswerSubmitted || Boolean(currentQ && submittedQuestionIds.includes(currentQ.id)))
                           ? 'bg-stone-300 text-stone-600 cursor-not-allowed'
+                          : !isAnswerSelected
+                          ? 'bg-stone-300 text-stone-500 cursor-not-allowed opacity-60'
                           : 'bg-amber-600 hover:bg-amber-700 text-white disabled:opacity-50 disabled:cursor-not-allowed'
                       }`}
                     >
                       <Check className="w-4 h-4" />
                       {isTimeExpired
                         ? (language === 'en' ? 'Time Expired (Closed)' : 'Ο χρόνος έληξε (Κλειστό)')
-                        : isAnswerSubmitted
+                        : (isAnswerSubmitted || Boolean(currentQ && submittedQuestionIds.includes(currentQ.id)))
                         ? (language === 'en' ? 'Answer Submitted' : 'Απάντηση Καταχωρήθηκε')
+                        : !isAnswerSelected
+                        ? (language === 'en' ? 'Select an Answer' : 'Επιλέξτε Απάντηση')
                         : t.submitAnswer}
                     </button>
 
                     <div className="flex items-center gap-2">
                       <button
                         onClick={handleResetQuestion}
-                        disabled={!isAdminLoggedIn && (isAnswerSubmitted || isFeedbackPeriodActive)}
+                        disabled={!isAdminLoggedIn && (isAnswerSubmitted || isFeedbackPeriodActive || Boolean(currentQ && submittedQuestionIds.includes(currentQ.id)))}
                         className={`px-3.5 py-2 text-xs font-semibold rounded-lg flex items-center gap-1.5 transition-all ${
-                          !isAdminLoggedIn && (isAnswerSubmitted || isFeedbackPeriodActive)
+                          !isAdminLoggedIn && (isAnswerSubmitted || isFeedbackPeriodActive || Boolean(currentQ && submittedQuestionIds.includes(currentQ.id)))
                             ? 'text-stone-400 border border-stone-200 bg-stone-50 cursor-not-allowed opacity-40'
                             : 'text-stone-600 hover:text-stone-900 border border-stone-200 hover:bg-stone-100 cursor-pointer'
                         }`}
                         title={
-                          !isAdminLoggedIn && isAnswerSubmitted
+                          !isAdminLoggedIn && (isAnswerSubmitted || Boolean(currentQ && submittedQuestionIds.includes(currentQ.id)))
                             ? (language === 'en' ? 'Answer already submitted' : 'Η απάντηση έχει ήδη καταχωρηθεί')
                             : undefined
                         }
@@ -3392,14 +3966,14 @@ function isYouTubeUrl(url: string): boolean {
                       </button>
                       <button
                         onClick={handleNextQuestion}
-                        disabled={!isAdminLoggedIn && (!isAnswerSubmitted || isFeedbackPeriodActive)}
+                        disabled={!isAdminLoggedIn && (!isAnswerSubmitted && !Boolean(currentQ && submittedQuestionIds.includes(currentQ.id)) || isFeedbackPeriodActive)}
                         className={`px-4 py-2 text-xs font-semibold rounded-lg flex items-center gap-1 transition-all ${
-                          !isAdminLoggedIn && (!isAnswerSubmitted || isFeedbackPeriodActive)
+                          !isAdminLoggedIn && (!isAnswerSubmitted && !Boolean(currentQ && submittedQuestionIds.includes(currentQ.id)) || isFeedbackPeriodActive)
                             ? 'bg-stone-200 text-stone-400 cursor-not-allowed opacity-40'
                             : 'bg-stone-900 text-white hover:bg-stone-800 cursor-pointer'
                         }`}
                         title={
-                          !isAdminLoggedIn && !isAnswerSubmitted
+                          !isAdminLoggedIn && !isAnswerSubmitted && !Boolean(currentQ && submittedQuestionIds.includes(currentQ.id))
                             ? (language === 'en' ? 'Submit your answer before continuing' : 'Υποβάλετε πρώτα την απάντηση για να συνεχίσετε')
                             : !isAdminLoggedIn && isFeedbackPeriodActive
                             ? (language === 'en' ? 'Reviewing explanation (auto-advancing)...' : 'Ανάγνωση επεξήγησης (αυτόματη μετάβαση)...')
@@ -3412,17 +3986,21 @@ function isYouTubeUrl(url: string): boolean {
                   </div>
 
                   {/* Scientific Explanation Card (Visible upon submission) */}
-                  {isAnswerSubmitted && (
+                  {(isAnswerSubmitted || Boolean(currentQ && submittedQuestionIds.includes(currentQ.id))) && (
                     <div
                       className={`p-6 rounded-2xl border transition-all ${
-                        isAnswerCorrect
+                        (currentQ && submittedAnswers[currentQ.id] !== undefined
+                          ? submittedAnswers[currentQ.id].isCorrect
+                          : isAnswerCorrect)
                           ? 'bg-emerald-50 border-emerald-300 text-emerald-950'
                           : 'bg-stone-50 border-stone-300 text-stone-900'
                       }`}
                     >
                       <div className="flex flex-wrap items-center justify-between gap-2 font-bold text-base mb-2">
                         <div className="flex items-center gap-2">
-                          {isAnswerCorrect ? (
+                          {(currentQ && submittedAnswers[currentQ.id] !== undefined
+                            ? submittedAnswers[currentQ.id].isCorrect
+                            : isAnswerCorrect) ? (
                             <>
                               <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
                               <span className="text-emerald-900">
@@ -3505,24 +4083,28 @@ function isYouTubeUrl(url: string): boolean {
                   {language === 'en' ? 'Create / Edit Poster' : 'Δημιουργία / Επεξεργασία Αφίσας'}
                 </button>
 
-                <button
-                  onClick={() => {
-                    const idx = Object.keys(posters).indexOf(selectedPosterTeamId);
-                    handleOpenPresentation(idx >= 0 ? idx : 0);
-                  }}
-                  className="px-4 py-2.5 bg-stone-900 hover:bg-stone-800 text-white font-bold text-xs sm:text-sm rounded-xl transition-colors shadow-xs flex items-center gap-2 cursor-pointer"
-                >
-                  <Tv className="w-4 h-4 text-amber-400" />
-                  {language === 'en' ? 'Classroom Presentation' : 'Παρουσίαση στην Τάξη'}
-                </button>
+                {isAdminLoggedIn && (
+                  <>
+                    <button
+                      onClick={() => {
+                        const idx = Object.keys(posters).indexOf(selectedPosterTeamId);
+                        handleOpenPresentation(idx >= 0 ? idx : 0);
+                      }}
+                      className="px-4 py-2.5 bg-stone-900 hover:bg-stone-800 text-white font-bold text-xs sm:text-sm rounded-xl transition-colors shadow-xs flex items-center gap-2 cursor-pointer"
+                    >
+                      <Tv className="w-4 h-4 text-amber-400" />
+                      {language === 'en' ? 'Classroom Presentation' : 'Παρουσίαση στην Τάξη'}
+                    </button>
 
-                <button
-                  onClick={() => setIsAdminReportOpen(true)}
-                  className="px-3.5 py-2.5 bg-stone-100 hover:bg-stone-200 text-stone-800 font-semibold text-xs sm:text-sm rounded-xl border border-stone-300 transition-colors flex items-center gap-1.5 cursor-pointer"
-                >
-                  <FileSpreadsheet className="w-4 h-4 text-purple-700" />
-                  {language === 'en' ? 'Export Reports' : 'Εξαγωγή Αναφορών'}
-                </button>
+                    <button
+                      onClick={() => setIsAdminReportOpen(true)}
+                      className="px-3.5 py-2.5 bg-stone-100 hover:bg-stone-200 text-stone-800 font-semibold text-xs sm:text-sm rounded-xl border border-stone-300 transition-colors flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <FileSpreadsheet className="w-4 h-4 text-purple-700" />
+                      {language === 'en' ? 'Export Reports' : 'Εξαγωγή Αναφορών'}
+                    </button>
+                  </>
+                )}
               </div>
             </div>
 
@@ -3937,27 +4519,39 @@ function isYouTubeUrl(url: string): boolean {
             <span className="text-amber-400 font-mono">ekpaideytiki-anafora-gypes-2026-10-29_1818ef45.json</span>
           </p>
           <div className="flex items-center gap-3 text-stone-400">
-            <button
-              onClick={() => setIsJoinQROpen(true)}
-              className="hover:text-emerald-400 transition-colors flex items-center gap-1 font-bold text-emerald-400 cursor-pointer"
-            >
-              <QrCode className="w-3.5 h-3.5" /> {t.joinQrBtn}
-            </button>
-            <span>•</span>
-            <button
-              onClick={() => handleOpenCreatePoster()}
-              className="hover:text-amber-400 transition-colors flex items-center gap-1 cursor-pointer"
-            >
-              <Palette className="w-3.5 h-3.5" /> {t.createPosterBtn}
-            </button>
-            <span>•</span>
-            <button
-              onClick={() => handleOpenPresentation(0)}
-              className="hover:text-amber-400 transition-colors flex items-center gap-1 cursor-pointer"
-            >
-              <Tv className="w-3.5 h-3.5" /> {t.presentationBtn}
-            </button>
-            <span>•</span>
+            {isAdminLoggedIn && (
+              <>
+                <button
+                  onClick={() => setIsJoinQROpen(true)}
+                  className="hover:text-emerald-400 transition-colors flex items-center gap-1 font-bold text-emerald-400 cursor-pointer"
+                >
+                  <QrCode className="w-3.5 h-3.5" /> {t.joinQrBtn}
+                </button>
+                <span>•</span>
+              </>
+            )}
+            {(isAdminLoggedIn || isCurrentTeamActivitiesCompleted) && (
+              <>
+                <button
+                  onClick={() => handleOpenCreatePoster()}
+                  className="hover:text-amber-400 transition-colors flex items-center gap-1 cursor-pointer"
+                >
+                  <Palette className="w-3.5 h-3.5" /> {t.createPosterBtn}
+                </button>
+                <span>•</span>
+              </>
+            )}
+            {isAdminLoggedIn && (
+              <>
+                <button
+                  onClick={() => handleOpenPresentation(0)}
+                  className="hover:text-amber-400 transition-colors flex items-center gap-1 cursor-pointer"
+                >
+                  <Tv className="w-3.5 h-3.5" /> {t.presentationBtn}
+                </button>
+                <span>•</span>
+              </>
+            )}
             <button
               onClick={() => {
                 if (isAdminLoggedIn) {
