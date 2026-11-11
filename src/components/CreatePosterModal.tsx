@@ -45,14 +45,28 @@ export const CreatePosterModal: React.FC<CreatePosterModalProps> = ({
   language = 'el',
 }) => {
   const isEn = language === 'en';
+  const formatMembers = (members: any): string => {
+    if (!members) {
+      return isEn
+        ? 'Andreas Constantinou, Maria Georgiou, Nicolas Christodoulou'
+        : 'Ανδρέας Κωνσταντίνου, Μαρία Γεωργίου, Νικόλας Χριστοδούλου';
+    }
+    if (Array.isArray(members)) {
+      return members
+        .filter((m) => typeof m === 'string' && m.trim().length > 0)
+        .join(', ');
+    }
+    if (typeof members === 'string') {
+      return members;
+    }
+    return '';
+  };
+
   const [selectedTeamId, setSelectedTeamId] = useState<string>(
     existingPoster?.teamId || initialTeamId
   );
-  const [membersInput, setMembersInput] = useState<string>(
-    existingPoster?.members?.join(', ') ||
-      (isEn
-        ? 'Andreas Constantinou, Maria Georgiou, Nicolas Christodoulou'
-        : 'Ανδρέας Κωνσταντίνου, Μαρία Γεωργίου, Νικόλας Χριστοδούλου')
+  const [membersInput, setMembersInput] = useState<string>(() =>
+    formatMembers(existingPoster?.members)
   );
 
   // Filter out any legacy stock URLs
@@ -76,6 +90,26 @@ export const CreatePosterModal: React.FC<CreatePosterModalProps> = ({
   const [quoteAuthor, setQuoteAuthor] = useState<string>(
     existingPoster?.quoteAuthor || 'Μαρία Γεωργίου, Ερευνήτρια Ομάδας'
   );
+
+  // Synchronize form fields when opening modal or when existingPoster changes
+  React.useEffect(() => {
+    if (isOpen) {
+      setSelectedTeamId(existingPoster?.teamId || initialTeamId);
+      setMembersInput(formatMembers(existingPoster?.members));
+      const validPhoto =
+        existingPoster?.photoUrl && !isGenericStockUrl(existingPoster.photoUrl)
+          ? existingPoster.photoUrl
+          : '';
+      setPhotoUrl(validPhoto);
+      setPhotoCaption(validPhoto ? (existingPoster?.photoCaption || '') : '');
+      if (existingPoster?.wowMomentQuote) {
+        setWowMomentQuote(existingPoster.wowMomentQuote);
+      }
+      if (existingPoster?.quoteAuthor) {
+        setQuoteAuthor(existingPoster.quoteAuthor);
+      }
+    }
+  }, [isOpen, existingPoster, initialTeamId, isEn]);
 
   if (!isOpen) return null;
 

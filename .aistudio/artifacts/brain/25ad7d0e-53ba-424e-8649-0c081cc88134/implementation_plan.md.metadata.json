@@ -1,6 +1,0 @@
-{
-  "summary": "Implementation plan for fixing SSE connection stability and REST polling fallback in the game synchronization logic. Stabilizes the useEffect by removing serverClockOffsetMs churn via a ref, and converts REST polling into an on-demand fallback when SSE drops, with immediate state recovery on reconnect.",
-  "updatedAt": "2026-11-05T10:18:31.872156194Z",
-  "requestFeedback": true,
-  "userFacing": true
-}

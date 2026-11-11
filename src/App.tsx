@@ -65,7 +65,16 @@ import { StudentEntryFlow } from './components/StudentEntryFlow';
 import { LiveGameTimer } from './components/LiveGameTimer';
 import { GameTimeExpiredModal } from './components/GameTimeExpiredModal';
 import { TeamQuestionSection } from './components/TeamQuestionSection';
+import { QRCameraScanner } from './components/QRCameraScanner';
+import { resolveQuestionMedia, resolveQuestionMediaUrl } from './utils/qrStationMediaStorage';
 import { exportFullJSONBackup, exportQuestionsCSV } from './utils/questionExportManager';
+import {
+  fetchServerPosters,
+  syncPosterToServer,
+  syncAllLocalPostersToServer,
+  clearServerGameData,
+} from './utils/posterSyncManager';
+import { ClearGameDataModal } from './components/ClearGameDataModal';
 import { Language, translations } from './i18n/translations';
 import { getLocalizedQuestion } from './i18n/questionTranslations';
 import {
@@ -169,13 +178,40 @@ export default function App() {
     return defaultQuestions;
   });
 
+  // Helper to ensure poster.members is always a string array
+  const normalizePosterObject = (poster: any) => {
+    if (!poster || typeof poster !== 'object') return poster;
+    if (typeof poster.members === 'string') {
+      return {
+        ...poster,
+        members: poster.members
+          .split(/[,;&]/)
+          .map((m: string) => m.trim())
+          .filter((m: string) => m.length > 0),
+      };
+    }
+    return poster;
+  };
+
+  const normalizePostersMap = (postersMap: Record<string, any>) => {
+    if (!postersMap || typeof postersMap !== 'object') return postersMap;
+    const res: Record<string, any> = {};
+    for (const [k, v] of Object.entries(postersMap)) {
+      res[k] = normalizePosterObject(v);
+    }
+    return res;
+  };
+
   // State for Posters
   const [posters, setPosters] = useState<Record<string, TeamPosterData>>(() => {
     if (typeof window !== 'undefined') {
       const saved = localStorage.getItem('vulture_posters_custom_v2');
       if (saved) {
         try {
-          return JSON.parse(saved);
+          const parsed = JSON.parse(saved);
+          if (parsed && typeof parsed === 'object') {
+            return normalizePostersMap(parsed);
+          }
         } catch (e) {
           console.error(e);
         }
@@ -221,6 +257,8 @@ export default function App() {
   const [isPresentationOpen, setIsPresentationOpen] = useState<boolean>(false);
   const [presentationIndex, setPresentationIndex] = useState<number>(0);
   const [isAdminReportOpen, setIsAdminReportOpen] = useState<boolean>(false);
+  const [isQRScannerOpen, setIsQRScannerOpen] = useState<boolean>(false);
+  const [isClearGameDataOpen, setIsClearGameDataOpen] = useState<boolean>(false);
 
   // Edit Question & Team Modals
   const [isEditQuestionOpen, setIsEditQuestionOpen] = useState<boolean>(false);
@@ -257,6 +295,47 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('vulture_admin_auth', String(isAdminLoggedIn));
   }, [isAdminLoggedIn]);
+
+  // Cross-device poster sync: fetch latest server-stored posters and submissions on mount
+  useEffect(() => {
+    let isMounted = true;
+    fetchServerPosters().then((serverData) => {
+      if (!isMounted || !serverData) return;
+      const { posters: sPosters, submissions: sSubs } = serverData;
+      if (sPosters && Object.keys(sPosters).length > 0) {
+        setPosters((prev) => {
+          const next = { ...prev, ...normalizePostersMap(sPosters) };
+          try {
+            localStorage.setItem('vulture_posters_custom_v2', JSON.stringify(next));
+          } catch {}
+          return next;
+        });
+      }
+      if (Array.isArray(sSubs) && sSubs.length > 0) {
+        setTeamPhotoSubmissions((prev) => {
+          const merged = [...prev];
+          for (const sub of sSubs) {
+            const idx = merged.findIndex(
+              (m) => m.id === sub.id || (m.teamId === sub.teamId && m.questionId === sub.questionId)
+            );
+            if (idx >= 0) {
+              merged[idx] = { ...merged[idx], ...sub };
+            } else {
+              merged.push(sub);
+            }
+          }
+          try {
+            localStorage.setItem('vulture_team_photo_submissions_v2', JSON.stringify(merged));
+          } catch {}
+          return merged;
+        });
+      }
+    });
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   // Student Session & Team Lock State
   const [isStudentConnected, setIsStudentConnected] = useState<boolean>(() => {
@@ -629,6 +708,83 @@ export default function App() {
           }
         } catch (err) {
           console.error(err);
+        }
+      });
+      sse.addEventListener('poster_updated', (e: MessageEvent) => {
+        try {
+          const parsed = JSON.parse(e.data);
+          if (parsed?.posters && typeof parsed.posters === 'object') {
+            setPosters((prev) => {
+              const next = { ...prev, ...normalizePostersMap(parsed.posters) };
+              try {
+                localStorage.setItem('vulture_posters_custom_v2', JSON.stringify(next));
+              } catch {}
+              return next;
+            });
+          } else if (parsed?.teamId && parsed?.poster) {
+            setPosters((prev) => {
+              const next = { ...prev, [parsed.teamId]: normalizePosterObject(parsed.poster) };
+              try {
+                localStorage.setItem('vulture_posters_custom_v2', JSON.stringify(next));
+              } catch {}
+              return next;
+            });
+          }
+
+          if (Array.isArray(parsed?.submissions) && parsed.submissions.length > 0) {
+            setTeamPhotoSubmissions((prev) => {
+              const merged = [...prev];
+              for (const sub of parsed.submissions) {
+                const idx = merged.findIndex(
+                  (m) => m.id === sub.id || (m.teamId === sub.teamId && m.questionId === sub.questionId)
+                );
+                if (idx >= 0) {
+                  merged[idx] = { ...merged[idx], ...sub };
+                } else {
+                  merged.push(sub);
+                }
+              }
+              try {
+                localStorage.setItem('vulture_team_photo_submissions_v2', JSON.stringify(merged));
+              } catch {}
+              return merged;
+            });
+          }
+        } catch (err) {
+          console.warn('[SSE] Error handling poster_updated event:', err);
+        }
+      });
+      sse.addEventListener('game_cleared', () => {
+        try {
+          if (autoAdvanceTimeoutRef.current) {
+            clearTimeout(autoAdvanceTimeoutRef.current);
+            autoAdvanceTimeoutRef.current = null;
+          }
+          setIsFeedbackPeriodActive(false);
+          setPosters(initialDefaultPosters);
+          setTeamPhotoSubmissions([]);
+          setSavedReflections({});
+          setSubmittedQuestionIds([]);
+          setCurrentQuestionIndex(0);
+          setAllTeamsProgress({});
+          setIsGameStarted(false);
+          setGameStartedAtMs(null);
+          setGameEndsAtMs(null);
+          setIsTimeExpired(false);
+          setShowTimeExpiredModal(false);
+          setHasDismissedExpiredModal(true);
+          try {
+            localStorage.removeItem('vulture_posters_custom_v2');
+            localStorage.removeItem('vulture_team_photo_submissions_v2');
+            localStorage.removeItem('vulture_team_reflections_v2');
+            localStorage.removeItem('vulture_submitted_questions_v2');
+            localStorage.removeItem('vulture_team_scores');
+            localStorage.setItem('vulture_game_started_v2', 'false');
+            localStorage.removeItem('vulture_game_ends_at_ms');
+            localStorage.removeItem('vulture_authoritative_start_time');
+          } catch {}
+        } catch (err) {
+          console.error('[SSE] Error handling game_cleared:', err);
         }
       });
     } catch {
@@ -1032,6 +1188,8 @@ export default function App() {
     }
     return [];
   });
+  const submittedQuestionIdsRef = useRef<string[]>(submittedQuestionIds);
+  submittedQuestionIdsRef.current = submittedQuestionIds;
 
   const [submittedAnswers, setSubmittedAnswers] = useState<Record<string, SubmittedAnswerRecord>>(() => {
     if (typeof window !== 'undefined') {
@@ -1181,42 +1339,97 @@ function isYouTubeUrl(url: string): boolean {
     return currentQ ? getLocalizedQuestion(currentQ, language) : undefined;
   }, [currentQ, language]);
 
-  // Synchronize user reflection text with active question draft / saved submission
-  useEffect(() => {
-    if (!currentQ) return;
-    if (isReflectionQuestion(currentQ)) {
-      const targetTeamId = currentQ.assignedTeamIds?.[0] || 'team-characteristics';
-      const draft = reflectionDrafts[currentQ.id];
-      const saved = savedReflections[currentQ.id]?.text;
-      const posterReflection = posters[targetTeamId]?.wowMomentQuote;
+  // Resolve media for the current question (including video and image Blobs stored in IndexedDB for QR stations)
+  const [resolvedStationMediaUrl, setResolvedStationMediaUrl] = useState<string | null>(null);
+  const [resolvedStationMediaType, setResolvedStationMediaType] = useState<'image' | 'video' | 'none'>('none');
 
-      if (draft !== undefined && draft !== '') {
-        setUserReflectionText(draft);
-      } else if (saved !== undefined && saved !== '') {
-        setUserReflectionText(saved);
-      } else if (posterReflection && posterReflection.trim()) {
-        setUserReflectionText(posterReflection);
-      } else {
-        setUserReflectionText('');
+  useEffect(() => {
+    let isMounted = true;
+    if (!currentQ) {
+      setResolvedStationMediaUrl(null);
+      setResolvedStationMediaType('none');
+      return;
+    }
+
+    const token = currentQ.type === 'qr_scan' ? (currentQ as QRScanQuestion).qrPayload : undefined;
+
+    resolveQuestionMedia(currentQ.mediaUrl, currentQ.mediaType, token).then((res) => {
+      if (isMounted) {
+        setResolvedStationMediaUrl(res.url);
+        setResolvedStationMediaType(res.mediaType);
       }
-    } else {
-      setUserReflectionText('');
+    });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [currentQ?.id, currentQ?.mediaUrl, currentQ?.mediaType, (currentQ as any)?.qrPayload]);
+
+  // Ensure reflection text and media state open completely empty without prepopulated content
+  useEffect(() => {
+    setUserReflectionText('');
+    if (isReflectionQuestion(currentQ)) {
+      setUserUploadedFile(null);
+      setUserUploadedDataUrl(null);
     }
   }, [currentQ?.id]);
 
   // Helper to advance to next question
-  const advanceToNextQuestion = () => {
+  const advanceToNextQuestion = (explicitSubmittedIds?: string[]) => {
     if (autoAdvanceTimeoutRef.current) {
       clearTimeout(autoAdvanceTimeoutRef.current);
       autoAdvanceTimeoutRef.current = null;
     }
     setIsFeedbackPeriodActive(false);
+
+    const currentSubmittedIds = explicitSubmittedIds || submittedQuestionIdsRef.current || submittedQuestionIds;
+
+    // Stop student navigation when their team has completed all active assigned questions or reached the last question
+    if (!isAdminLoggedIn && studentSelectedTeamId) {
+      const teamAssigned = questions.filter(
+        (q) => q.isActive && q.assignedTeamIds.includes(studentSelectedTeamId)
+      );
+      const submittedSet = new Set(currentSubmittedIds);
+      const allCompleted = teamAssigned.length > 0 && teamAssigned.every((q) => submittedSet.has(q.id));
+      const isAtLastQuestion = currentQuestionIndex >= activeQuestions.length - 1;
+
+      if (allCompleted || isAtLastQuestion) {
+        resetQuestionState();
+        const lastIndex = Math.max(0, activeQuestions.length - 1);
+        setCurrentQuestionIndex(lastIndex);
+        const currentTargetQ = activeQuestions[lastIndex];
+        if (currentTargetQ) {
+          saveStudentDeviceProgress({
+            teamId: studentSelectedTeamId,
+            currentQuestionIndex: lastIndex,
+            currentQuestionId: currentTargetQ.id,
+            answeredCount,
+            score,
+            submittedQuestionIds: currentSubmittedIds,
+            submittedAnswers,
+            feedbackActiveForQuestionId: null,
+            feedbackEndsAtMs: null,
+            lastSavedAtMs: Date.now(),
+          });
+        }
+        return;
+      }
+    }
+
     resetQuestionState();
-    const nextIndex = (currentQuestionIndex + 1) % (activeQuestions.length || 1);
+
+    // Never use modulo arithmetic for students: students progress linearly without wrapping to 0.
+    // Circular navigation is preserved for administrators only.
+    let nextIndex = 0;
+    if (!isAdminLoggedIn) {
+      nextIndex = Math.min(currentQuestionIndex + 1, Math.max(0, activeQuestions.length - 1));
+    } else {
+      nextIndex = (currentQuestionIndex + 1) % (activeQuestions.length || 1);
+    }
     setCurrentQuestionIndex(nextIndex);
 
     const nextQ = activeQuestions[nextIndex];
-    const isAlreadySubmitted = Boolean(nextQ && submittedQuestionIds.includes(nextQ.id));
+    const isAlreadySubmitted = Boolean(nextQ && currentSubmittedIds.includes(nextQ.id));
     setIsAnswerSubmitted(isAlreadySubmitted);
 
     if (!isAdminLoggedIn && studentSelectedTeamId && nextQ) {
@@ -1226,7 +1439,7 @@ function isYouTubeUrl(url: string): boolean {
         currentQuestionId: nextQ.id,
         answeredCount,
         score,
-        submittedQuestionIds,
+        submittedQuestionIds: currentSubmittedIds,
         submittedAnswers,
         feedbackActiveForQuestionId: null,
         feedbackEndsAtMs: null,
@@ -1251,8 +1464,15 @@ function isYouTubeUrl(url: string): boolean {
     setUserQrInput('');
     setUserUploadedFile(null);
     setUserUploadedDataUrl(null);
+    setUserReflectionText('');
     setIsAnswerSubmitted(false);
+    setIsQRScannerOpen(false);
   };
+
+  // Close QR camera scanner if active question changes
+  useEffect(() => {
+    setIsQRScannerOpen(false);
+  }, [currentQuestionIndex, currentQ?.id]);
 
   // Safe reset for pupils with confirmation if reflection text exists
   const handleResetQuestion = () => {
@@ -1281,11 +1501,85 @@ function isYouTubeUrl(url: string): boolean {
     resetQuestionState();
   };
 
+  const handleCompleteStationAndContinue = () => {
+    if (!currentQ || currentQ.type !== 'qr_scan') {
+      advanceToNextQuestion();
+      return;
+    }
+
+    const targetTeamId =
+      (currentQ.assignedTeamIds && currentQ.assignedTeamIds[0]) || studentSelectedTeamId || 'team-characteristics';
+
+    const isAlreadySubmitted = (submittedQuestionIdsRef.current || submittedQuestionIds).includes(currentQ.id);
+    const updatedSubmittedIds = isAlreadySubmitted
+      ? (submittedQuestionIdsRef.current || submittedQuestionIds)
+      : [...submittedQuestionIds, currentQ.id];
+
+    if (!isAlreadySubmitted) {
+      const pointsAwarded = currentQ.points || 0;
+      const newScore = score + pointsAwarded;
+      const newAnswered = answeredCount + 1;
+
+      setScore(newScore);
+      setAnsweredCount(newAnswered);
+
+      setSubmittedQuestionIds(updatedSubmittedIds);
+      submittedQuestionIdsRef.current = updatedSubmittedIds;
+
+      const updatedSubmittedAnswers: Record<string, SubmittedAnswerRecord> = {
+        ...submittedAnswers,
+        [currentQ.id]: {
+          isCorrect: true,
+          pointsAwarded,
+          submittedAtMs: Date.now(),
+        },
+      };
+      setSubmittedAnswers(updatedSubmittedAnswers);
+
+      reportProgressToServer(targetTeamId, newAnswered, newScore);
+
+      if (!isAdminLoggedIn) {
+        saveStudentDeviceProgress({
+          teamId: targetTeamId,
+          currentQuestionIndex,
+          currentQuestionId: currentQ.id,
+          answeredCount: newAnswered,
+          score: newScore,
+          submittedQuestionIds: updatedSubmittedIds,
+          submittedAnswers: updatedSubmittedAnswers,
+          feedbackActiveForQuestionId: null,
+          feedbackEndsAtMs: null,
+          lastSavedAtMs: Date.now(),
+        });
+      }
+    }
+
+    advanceToNextQuestion(updatedSubmittedIds);
+  };
+
   const handleNextQuestion = () => {
+    if (currentQ?.type === 'qr_scan') {
+      const qrExpected = (currentQ as QRScanQuestion).qrPayload?.trim().toUpperCase() || '';
+      const enteredQrClean = userQrInput.trim().toUpperCase();
+      const isQrValidMatch = enteredQrClean.length > 0 && enteredQrClean === qrExpected;
+      const isStationUnlocked = isQrValidMatch || submittedQuestionIds.includes(currentQ.id);
+      if (!isAdminLoggedIn && !isStationUnlocked) {
+        return;
+      }
+      handleCompleteStationAndContinue();
+      return;
+    }
+
     // In student mode, disable manual next before submission or during feedback
     if (!isAdminLoggedIn && (!isAnswerSubmitted || isFeedbackPeriodActive)) {
       return;
     }
+
+    // In student mode, if already at the final assigned question, do not wrap around
+    if (!isAdminLoggedIn && currentQuestionIndex >= activeQuestions.length - 1) {
+      return;
+    }
+
     advanceToNextQuestion();
   };
 
@@ -1300,7 +1594,14 @@ function isYouTubeUrl(url: string): boolean {
     }
     setIsFeedbackPeriodActive(false);
     resetQuestionState();
-    const prevIndex = (currentQuestionIndex - 1 + activeQuestions.length) % (activeQuestions.length || 1);
+
+    // In student mode, clamp at Question 0 without wrapping backwards. Admin preserves circular navigation.
+    let prevIndex = 0;
+    if (!isAdminLoggedIn) {
+      prevIndex = Math.max(0, currentQuestionIndex - 1);
+    } else {
+      prevIndex = (currentQuestionIndex - 1 + activeQuestions.length) % (activeQuestions.length || 1);
+    }
     setCurrentQuestionIndex(prevIndex);
 
     const prevQ = activeQuestions[prevIndex];
@@ -1376,32 +1677,63 @@ function isYouTubeUrl(url: string): boolean {
               advanceToNextQuestion();
             }, remainingMs);
           } else {
-            // 8-second feedback period elapsed while away: advance cleanly to the next question
+            // 8-second feedback period elapsed while away: advance cleanly to the next question or preserve completion
             const qIndex = teamQuestions.findIndex((q) => q.id === savedData.feedbackActiveForQuestionId);
             const resolvedIndex = qIndex !== -1 ? qIndex : savedData.currentQuestionIndex;
-            const nextIndex = teamQuestions.length > 0 ? (resolvedIndex + 1) % teamQuestions.length : 0;
-            setCurrentQuestionIndex(nextIndex);
-            setIsAnswerSubmitted(false);
-            setIsFeedbackPeriodActive(false);
-            resetQuestionState();
 
-            // Save the resolved question position
-            const nextQ = teamQuestions[nextIndex];
-            if (nextQ) {
-              saveStudentDeviceProgress({
-                ...savedData,
-                currentQuestionIndex: nextIndex,
-                currentQuestionId: nextQ.id,
-                feedbackActiveForQuestionId: null,
-                feedbackEndsAtMs: null,
-                lastSavedAtMs: now,
-              });
+            const savedSubmittedSet = new Set(savedData.submittedQuestionIds || []);
+            const allTeamQuestionsCompleted =
+              teamQuestions.length > 0 && teamQuestions.every((q) => savedSubmittedSet.has(q.id));
+
+            if (allTeamQuestionsCompleted) {
+              const lastIndex = Math.max(0, teamQuestions.length - 1);
+              setCurrentQuestionIndex(lastIndex);
+              setIsAnswerSubmitted(true);
+              setIsFeedbackPeriodActive(false);
+              resetQuestionState();
+
+              const lastQ = teamQuestions[lastIndex];
+              if (lastQ) {
+                saveStudentDeviceProgress({
+                  ...savedData,
+                  currentQuestionIndex: lastIndex,
+                  currentQuestionId: lastQ.id,
+                  feedbackActiveForQuestionId: null,
+                  feedbackEndsAtMs: null,
+                  lastSavedAtMs: now,
+                });
+              }
+            } else {
+              const nextIndex = Math.min(resolvedIndex + 1, Math.max(0, teamQuestions.length - 1));
+              setCurrentQuestionIndex(nextIndex);
+              setIsAnswerSubmitted(false);
+              setIsFeedbackPeriodActive(false);
+              resetQuestionState();
+
+              // Save the resolved question position
+              const nextQ = teamQuestions[nextIndex];
+              if (nextQ) {
+                saveStudentDeviceProgress({
+                  ...savedData,
+                  currentQuestionIndex: nextIndex,
+                  currentQuestionId: nextQ.id,
+                  feedbackActiveForQuestionId: null,
+                  feedbackEndsAtMs: null,
+                  lastSavedAtMs: now,
+                });
+              }
             }
           }
         } else {
           // Standard question position restoration
+          const savedSubmittedSet = new Set(savedData.submittedQuestionIds || []);
+          const allTeamQuestionsCompleted =
+            teamQuestions.length > 0 && teamQuestions.every((q) => savedSubmittedSet.has(q.id));
+
           let resolvedIndex = 0;
-          if (savedData.currentQuestionId) {
+          if (allTeamQuestionsCompleted) {
+            resolvedIndex = Math.max(0, teamQuestions.length - 1);
+          } else if (savedData.currentQuestionId) {
             const idx = teamQuestions.findIndex((q) => q.id === savedData.currentQuestionId);
             if (idx !== -1) {
               resolvedIndex = idx;
@@ -1564,11 +1896,7 @@ function isYouTubeUrl(url: string): boolean {
       case 'photo_upload':
       case 'video_upload':
         if (isReflectionQuestion(currentQ)) {
-          return Boolean(
-            userUploadedFile ||
-            userReflectionText.trim().length > 0 ||
-            (savedReflections[currentQ.id]?.text && savedReflections[currentQ.id].text.trim().length > 0)
-          );
+          return userReflectionText.trim().length > 0;
         }
         return Boolean(userUploadedFile);
       default:
@@ -1611,11 +1939,7 @@ function isYouTubeUrl(url: string): boolean {
       case 'photo_upload':
       case 'video_upload':
         if (isReflectionQuestion(currentQ)) {
-          return Boolean(
-            userUploadedFile ||
-            userReflectionText.trim().length > 0 ||
-            (savedReflections[currentQ.id]?.text && savedReflections[currentQ.id].text.trim().length > 0)
-          );
+          return userReflectionText.trim().length > 0;
         }
         return Boolean(userUploadedFile);
       default:
@@ -1669,6 +1993,7 @@ function isYouTubeUrl(url: string): boolean {
       ? [...submittedQuestionIds, currentQ.id]
       : submittedQuestionIds;
     setSubmittedQuestionIds(updatedSubmittedIds);
+    submittedQuestionIdsRef.current = updatedSubmittedIds;
 
     const updatedSubmittedAnswers: Record<string, SubmittedAnswerRecord> = {
       ...submittedAnswers,
@@ -1738,6 +2063,8 @@ function isYouTubeUrl(url: string): boolean {
           if (typeof window !== 'undefined') {
             localStorage.setItem('vulture_posters_custom_v2', JSON.stringify(next));
           }
+          // Sync updated poster to central server for teacher/admin projection
+          syncPosterToServer(targetTeamId, updated);
           return next;
         });
       }
@@ -1780,6 +2107,8 @@ function isYouTubeUrl(url: string): boolean {
               console.warn('LocalStorage quota reached when saving poster update, keeping in-memory:', storageErr);
             }
           }
+          // Sync updated poster and photo submission to central server
+          syncPosterToServer(targetTeamId, updated, newSub);
           return next;
         });
       }
@@ -1792,7 +2121,7 @@ function isYouTubeUrl(url: string): boolean {
         clearTimeout(autoAdvanceTimeoutRef.current);
       }
       autoAdvanceTimeoutRef.current = setTimeout(() => {
-        advanceToNextQuestion();
+        advanceToNextQuestion(updatedSubmittedIds);
       }, 8000);
     }
   };
@@ -1861,6 +2190,65 @@ function isYouTubeUrl(url: string): boolean {
     }
   };
 
+  // Administrator Action: New Game - Clear Previous Game Data
+  const handleConfirmClearGameData = async () => {
+    // 1. Cancel any active auto-advance timers
+    if (autoAdvanceTimeoutRef.current) {
+      clearTimeout(autoAdvanceTimeoutRef.current);
+      autoAdvanceTimeoutRef.current = null;
+    }
+    setIsFeedbackPeriodActive(false);
+
+    // 2. Call central server to clear posters, submissions, and session data
+    try {
+      await clearServerGameData();
+    } catch (err) {
+      console.warn('Failed to clear server game data:', err);
+    }
+
+    // 3. Reset local poster data to initial scientific defaults
+    setPosters(initialDefaultPosters);
+    setTeamPhotoSubmissions([]);
+    setSavedReflections({});
+    setSubmittedQuestionIds([]);
+    setCurrentQuestionIndex(0);
+    setAllTeamsProgress({});
+
+    // 4. Reset game session & lobby timers
+    setIsGameStarted(false);
+    setGameStartedAtMs(null);
+    setGameEndsAtMs(null);
+    setIsTimeExpired(false);
+    setShowTimeExpiredModal(false);
+    setHasDismissedExpiredModal(true);
+
+    // 5. Clean local storage for this device (preserving admin auth, custom questions, and team configs)
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.removeItem('vulture_posters_custom_v2');
+        localStorage.removeItem('vulture_team_photo_submissions_v2');
+        localStorage.removeItem('vulture_team_reflections_v2');
+        localStorage.removeItem('vulture_submitted_questions_v2');
+        localStorage.removeItem('vulture_team_scores');
+        localStorage.setItem('vulture_game_started_v2', 'false');
+        localStorage.removeItem('vulture_game_ends_at_ms');
+        localStorage.removeItem('vulture_authoritative_start_time');
+        window.dispatchEvent(new Event('storage'));
+      } catch (e) {
+        console.warn('Error clearing localStorage for new game:', e);
+      }
+    }
+
+    // 6. Broadcast across local browser tabs
+    if (syncChannel) {
+      syncChannel.postMessage({
+        type: 'GAME_STATE_CHANGED',
+        state: { isStarted: false, endsAtMs: null, isExpired: false },
+      });
+      syncChannel.postMessage({ type: 'GAME_CLEARED' });
+    }
+  };
+
   // Open Create Poster modal
   const handleOpenCreatePoster = (teamId?: string) => {
     const targetTeam = teamId || selectedPosterTeamId || 'team-characteristics';
@@ -1875,7 +2263,46 @@ function isYouTubeUrl(url: string): boolean {
     }));
     setSelectedPosterTeamId(newPoster.teamId);
     setActiveTab('posters');
+    // Sync to central server so teacher/admin immediately receives it
+    syncPosterToServer(newPoster.teamId, newPoster);
   };
+
+  const handleRefreshPosters = async () => {
+    const serverData = await fetchServerPosters();
+    if (!serverData) return;
+    if (serverData.posters && Object.keys(serverData.posters).length > 0) {
+      setPosters((prev) => {
+        const next = { ...prev, ...normalizePostersMap(serverData.posters) };
+        try {
+          localStorage.setItem('vulture_posters_custom_v2', JSON.stringify(next));
+        } catch {}
+        return next;
+      });
+    }
+    if (Array.isArray(serverData.submissions) && serverData.submissions.length > 0) {
+      setTeamPhotoSubmissions((prev) => {
+        const merged = [...prev];
+        for (const sub of serverData.submissions) {
+          const idx = merged.findIndex(
+            (m) => m.id === sub.id || (m.teamId === sub.teamId && m.questionId === sub.questionId)
+          );
+          if (idx >= 0) merged[idx] = { ...merged[idx], ...sub };
+          else merged.push(sub);
+        }
+        try {
+          localStorage.setItem('vulture_team_photo_submissions_v2', JSON.stringify(merged));
+        } catch {}
+        return merged;
+      });
+    }
+  };
+
+  // Re-sync when opening teacher presentation mode
+  useEffect(() => {
+    if (isPresentationOpen) {
+      handleRefreshPosters();
+    }
+  }, [isPresentationOpen]);
 
   const handleOpenPresentation = (teamIndex: number = 0) => {
     setPresentationIndex(teamIndex);
@@ -1989,7 +2416,10 @@ function isYouTubeUrl(url: string): boolean {
     };
   };
 
-  const rawPosterData = posters[selectedPosterTeamId] || Object.values(posters)[0];
+  const effectiveSelectedPosterTeamId = (!isAdminLoggedIn && studentSelectedTeamId)
+    ? studentSelectedTeamId
+    : selectedPosterTeamId;
+  const rawPosterData = posters[effectiveSelectedPosterTeamId] || Object.values(posters)[0];
   const currentPosterData = useMemo(() => {
     return rawPosterData ? getPosterWithDynamicFacts(rawPosterData, language) : null;
   }, [rawPosterData, questions, teamPhotoSubmissions, savedReflections, language]);
@@ -2014,8 +2444,9 @@ function isYouTubeUrl(url: string): boolean {
     );
     const totalAssigned = teamAssignedQuestions.length;
     if (totalAssigned === 0) return false;
-    return answeredCount >= totalAssigned;
-  }, [studentSelectedTeamId, questions, answeredCount]);
+    const submittedSet = new Set(submittedQuestionIds);
+    return teamAssignedQuestions.every((q) => submittedSet.has(q.id));
+  }, [studentSelectedTeamId, questions, submittedQuestionIds]);
 
   // STUDENT FLOW GATE: If user is not an administrator, enforce access code, team selection, returning student choice, and waiting lobby
   if (
@@ -2193,6 +2624,24 @@ function isYouTubeUrl(url: string): boolean {
             >
               <RotateCcw className="w-3 h-3 text-amber-400" />
               <span>{language === 'en' ? 'Reset Student Locks' : 'Επαναφορά Κλειδωμάτων'}</span>
+            </button>
+
+            {/* Administrator New Game Clear Button */}
+            <button
+              onClick={() => setIsClearGameDataOpen(true)}
+              className="px-2.5 py-1 bg-rose-900/90 hover:bg-rose-900 text-rose-100 border border-rose-500/80 rounded-lg transition-colors flex items-center gap-1 cursor-pointer text-xs font-bold shadow-xs"
+              title={
+                language === 'en'
+                  ? 'New Game – Clear Previous Game Data'
+                  : 'Νέο παιχνίδι – Καθαρισμός προηγούμενων δεδομένων'
+              }
+            >
+              <RotateCcw className="w-3 h-3 text-rose-300" />
+              <span>
+                {language === 'en'
+                  ? 'New Game – Clear Previous Game Data'
+                  : 'Νέο παιχνίδι – Καθαρισμός προηγούμενων δεδομένων'}
+              </span>
             </button>
 
             <button
@@ -3021,8 +3470,8 @@ function isYouTubeUrl(url: string): boolean {
               </div>
             )}
 
-            {/* Quest Completion Callout for Poster Creation (Visible when all team activities completed or admin) */}
-            {(isAdminLoggedIn || isCurrentTeamActivitiesCompleted) && answeredCount > 0 && (
+            {/* Quest Completion Callout for Poster Creation (Visible for admin) */}
+            {isAdminLoggedIn && answeredCount > 0 && (
               <div className="p-4 bg-linear-to-r from-amber-500/10 via-amber-500/20 to-emerald-500/10 rounded-2xl border border-amber-300 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-2xs">
                 <div className="flex items-center gap-3">
                   <div className="w-10 h-10 rounded-xl bg-amber-500 text-white flex items-center justify-center text-xl shrink-0">
@@ -3101,8 +3550,66 @@ function isYouTubeUrl(url: string): boolean {
               </div>
             )}
 
-            {/* Filter & Navigation Bar */}
-            <div className={`bg-white rounded-2xl border border-stone-200 shadow-sm flex items-center justify-between gap-3 ${
+            {!isAdminLoggedIn && isCurrentTeamActivitiesCompleted && !isFeedbackPeriodActive ? (
+              /* Student Team Completion Screen */
+              <div className="bg-white rounded-3xl border-2 border-amber-400 p-8 sm:p-12 text-center shadow-lg space-y-6 max-w-2xl mx-auto my-6 sm:my-10">
+                <div className="w-20 h-20 sm:w-24 sm:h-24 mx-auto rounded-3xl bg-linear-to-br from-amber-400 to-amber-600 text-white flex items-center justify-center text-4xl sm:text-5xl shadow-md">
+                  🎉
+                </div>
+
+                <div className="space-y-3">
+                  <div className="inline-flex items-center gap-2 px-3.5 py-1 bg-amber-50 border border-amber-200 text-amber-900 rounded-full text-xs font-black uppercase tracking-wider">
+                    {studentSelectedTeamId ? (
+                      <>
+                        <span>{teams.find((t) => t.id === studentSelectedTeamId)?.avatar || '🦅'}</span>
+                        <span>
+                          {language === 'en'
+                            ? teams.find((t) => t.id === studentSelectedTeamId)?.titleEn || teams.find((t) => t.id === studentSelectedTeamId)?.title
+                            : teams.find((t) => t.id === studentSelectedTeamId)?.title}
+                        </span>
+                      </>
+                    ) : (
+                      <span>🦅</span>
+                    )}
+                  </div>
+
+                  <h2 className="text-2xl sm:text-3xl font-black text-stone-900 tracking-tight leading-snug">
+                    {language === 'el'
+                      ? 'Συγχαρητήρια! Ολοκληρώσατε όλες τις αποστολές σας!'
+                      : 'Congratulations! You have completed all your missions!'}
+                  </h2>
+
+                  <p className="text-sm sm:text-base text-stone-600 font-medium max-w-md mx-auto">
+                    {language === 'el'
+                      ? 'Όλες οι ερωτήσεις και οι δραστηριότητες πεδίου της ομάδας σας καταγράφηκαν με επιτυχία.'
+                      : 'All field questions and activities for your team have been successfully completed.'}
+                  </p>
+                </div>
+
+                <div className="pt-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (studentSelectedTeamId) {
+                        setSelectedPosterTeamId(studentSelectedTeamId);
+                      }
+                      setActiveTab('posters');
+                    }}
+                    className="px-6 py-3.5 bg-amber-500 hover:bg-amber-600 active:scale-95 text-stone-950 font-black text-sm sm:text-base rounded-2xl shadow-md hover:shadow-lg transition-all inline-flex items-center gap-2.5 cursor-pointer"
+                  >
+                    <Palette className="w-5 h-5 text-stone-950" />
+                    <span>
+                      {language === 'el'
+                        ? 'Δείτε την αφίσα της ομάδας σας'
+                        : 'View your team poster'}
+                    </span>
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <>
+                {/* Filter & Navigation Bar */}
+                <div className={`bg-white rounded-2xl border border-stone-200 shadow-sm flex items-center justify-between gap-3 ${
               isAdminLoggedIn ? 'p-4 flex-col md:flex-row' : 'px-4 py-2.5'
             }`}>
               {isAdminLoggedIn ? (
@@ -3316,13 +3823,14 @@ function isYouTubeUrl(url: string): boolean {
                   </div>
 
                   {/* Attached Media Presentation (Photo or Video) */}
-                  {activeQ.mediaUrl && (
+                  {/* For standard questions, show attached media. For QR stations, educational material is shown after QR code verification or for admin preview. */}
+                  {resolvedStationMediaUrl && (activeQ.type !== 'qr_scan' || isAdminLoggedIn) && (
                     <div className="rounded-2xl overflow-hidden border border-stone-200 bg-stone-950 shadow-md">
-                      {activeQ.mediaType === 'video' ? (
-                        isYouTubeUrl(activeQ.mediaUrl) ? (
+                      {resolvedStationMediaType === 'video' ? (
+                        isYouTubeUrl(resolvedStationMediaUrl) ? (
                           <div className="aspect-video w-full max-h-96">
                             <iframe
-                              src={getYouTubeEmbedUrl(activeQ.mediaUrl)}
+                              src={getYouTubeEmbedUrl(resolvedStationMediaUrl)}
                               title={language === 'el' ? 'Εκπαιδευτικό Βίντεο Αποστολής' : 'Mission Educational Video'}
                               className="w-full h-full"
                               allowFullScreen
@@ -3330,7 +3838,7 @@ function isYouTubeUrl(url: string): boolean {
                           </div>
                         ) : (
                           <video
-                            src={activeQ.mediaUrl}
+                            src={resolvedStationMediaUrl}
                             controls
                             className="w-full max-h-96 mx-auto bg-black"
                           />
@@ -3338,7 +3846,7 @@ function isYouTubeUrl(url: string): boolean {
                       ) : (
                         <div className="flex flex-col items-center p-3 bg-stone-900/60">
                           <img
-                            src={activeQ.mediaUrl}
+                            src={resolvedStationMediaUrl}
                             alt={activeQ.title}
                             className="max-h-80 w-auto object-contain rounded-xl shadow-xs"
                           />
@@ -3622,54 +4130,245 @@ function isYouTubeUrl(url: string): boolean {
                   )}
 
                   {/* 6. QR Code Scan Station */}
-                  {activeQ.type === 'qr_scan' && (
-                    <div className="bg-stone-50 border border-stone-200 rounded-2xl p-6 space-y-4">
-                      <div className="flex items-start gap-4">
-                        <div className="w-14 h-14 bg-rose-100 border border-rose-300 rounded-2xl flex items-center justify-center text-rose-700 shrink-0">
-                          <QrCode className="w-8 h-8" />
-                        </div>
-                        <div>
-                          <h4 className="font-bold text-stone-900 text-base">
-                            {(activeQ as QRScanQuestion).stationName}
-                          </h4>
-                          <p className="text-xs text-stone-500 flex items-center gap-1 mt-0.5">
-                            <MapPin className="w-3.5 h-3.5 text-stone-400" />
-                            {(activeQ as QRScanQuestion).stationLocation}
-                          </p>
-                          <p className="mt-2 text-xs bg-white p-2.5 rounded-lg border border-stone-200 text-stone-700">
-                            🔍 <strong>{language === 'el' ? 'Ένδειξη Πεδίου:' : 'Field Clue:'}</strong> {(activeQ as QRScanQuestion).fieldClue}
-                          </p>
-                        </div>
-                      </div>
+                  {activeQ.type === 'qr_scan' && (() => {
+                    const qrExpected = (activeQ as QRScanQuestion).qrPayload?.trim().toUpperCase() || '';
+                    const enteredQrClean = userQrInput.trim().toUpperCase();
+                    const isQrValidMatch = enteredQrClean.length > 0 && enteredQrClean === qrExpected;
+                    const isStationUnlocked = isQrValidMatch || isAnswerSubmitted;
+                    const isQrInvalid = enteredQrClean.length > 0 && enteredQrClean !== qrExpected && !isAnswerSubmitted;
 
-                      <div className="pt-2">
-                        <label className="block text-xs font-semibold text-stone-700 mb-1">
-                          {t.qrScanLabel}
-                        </label>
-                        <div className="flex gap-2">
-                          <input
-                            type="text"
-                            disabled={isAnswerSubmitted}
-                            value={userQrInput}
-                            onChange={(e) => setUserQrInput(e.target.value)}
-                            placeholder="π.χ. VA-STATION-EPISKOPI-CLIFFS-2026"
-                            className="flex-1 text-sm bg-white border border-stone-300 rounded-xl px-4 py-2 font-mono text-stone-900 focus:outline-none focus:ring-2 focus:ring-rose-500 uppercase"
-                          />
-                          <button
-                            type="button"
-                            disabled={isAnswerSubmitted}
-                            onClick={() => setUserQrInput((activeQ as QRScanQuestion).qrPayload)}
-                            className="px-3 py-2 bg-stone-200 hover:bg-stone-300 text-stone-800 text-xs font-semibold rounded-xl cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                          >
-                            {t.autoScanQr}
-                          </button>
+                    return (
+                      <div className="bg-stone-50 border border-stone-200 rounded-2xl p-6 space-y-5">
+                        {/* Admin Educational Material Management Bar (visible to admins) */}
+                        {isAdminLoggedIn && (
+                          <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-xl flex flex-wrap items-center justify-between gap-3 text-xs">
+                            <div className="flex items-center gap-2">
+                              <span className="font-bold text-amber-900 flex items-center gap-1">
+                                <SlidersHorizontal className="w-4 h-4 text-amber-700" />
+                                {language === 'el' ? 'Διαχείριση Εκπαιδευτικού Υλικού Σταθμού:' : 'Station Educational Media Admin:'}
+                              </span>
+                              {resolvedStationMediaUrl ? (
+                                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
+                                  {resolvedStationMediaType === 'video' ? <Video className="w-3.5 h-3.5" /> : <Camera className="w-3.5 h-3.5" />}
+                                  {resolvedStationMediaType === 'video'
+                                    ? (language === 'el' ? 'Εκπαιδευτικό Βίντεο Συνδεδεμένο' : 'Educational Video Linked')
+                                    : (language === 'el' ? 'Εκπαιδευτική Εικόνα Συνδεδεμένη' : 'Educational Image Linked')}
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold bg-stone-200 text-stone-700">
+                                  <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
+                                  {language === 'el' ? 'Δεν έχει οριστεί υλικό' : 'No media configured'}
+                                </span>
+                              )}
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => currentQ && handleOpenEditQuestion(currentQ)}
+                              className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white font-bold rounded-lg cursor-pointer transition-all flex items-center gap-1.5 shadow-2xs text-xs"
+                            >
+                              <SlidersHorizontal className="w-3.5 h-3.5" />
+                              <span>{language === 'el' ? 'Μεταφόρτωση / Επεξεργασία Υλικού Σταθμού' : 'Upload / Edit Station Media'}</span>
+                            </button>
+                          </div>
+                        )}
+
+                        <div className="flex items-start gap-4">
+                          <div className="w-14 h-14 bg-rose-100 border border-rose-300 rounded-2xl flex items-center justify-center text-rose-700 shrink-0">
+                            <QrCode className="w-8 h-8" />
+                          </div>
+                          <div>
+                            <h4 className="font-bold text-stone-900 text-base">
+                              {(activeQ as QRScanQuestion).stationName}
+                            </h4>
+                            <p className="text-xs text-stone-500 flex items-center gap-1 mt-0.5">
+                              <MapPin className="w-3.5 h-3.5 text-stone-400" />
+                              {(activeQ as QRScanQuestion).stationLocation}
+                            </p>
+                            <p className="mt-2 text-xs bg-white p-2.5 rounded-lg border border-stone-200 text-stone-700">
+                              🔍 <strong>{language === 'el' ? 'Ένδειξη Πεδίου:' : 'Field Clue:'}</strong> {(activeQ as QRScanQuestion).fieldClue}
+                            </p>
+                          </div>
                         </div>
-                        <p className="text-[11px] text-stone-400 mt-1">
-                          {t.expectedToken} <code className="text-stone-600 font-mono">{(activeQ as QRScanQuestion).qrPayload}</code>
-                        </p>
+
+                        <div className="pt-2">
+                          <label className="block text-xs font-semibold text-stone-700 mb-1">
+                            {t.qrScanLabel}
+                          </label>
+                          <div className="flex flex-col sm:flex-row gap-2">
+                            <input
+                              type="text"
+                              disabled={isAnswerSubmitted}
+                              value={userQrInput}
+                              onChange={(e) => setUserQrInput(e.target.value)}
+                              placeholder="π.χ. VA-STATION-EPISKOPI-CLIFFS-2026"
+                              className={`flex-1 text-sm bg-white border rounded-xl px-4 py-2 font-mono text-stone-900 focus:outline-none focus:ring-2 uppercase ${
+                                isQrInvalid
+                                  ? 'border-rose-400 focus:ring-rose-500 bg-rose-50/40'
+                                  : isQrValidMatch
+                                  ? 'border-emerald-500 focus:ring-emerald-500 bg-emerald-50/40'
+                                  : 'border-stone-300 focus:ring-rose-500'
+                              }`}
+                            />
+                            <button
+                              type="button"
+                              disabled={isAnswerSubmitted}
+                              onClick={() => setIsQRScannerOpen(true)}
+                              className="px-4 py-2.5 bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold rounded-xl cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-all shadow-xs flex items-center justify-center gap-1.5 shrink-0"
+                            >
+                              <Camera className="w-4 h-4" />
+                              <span>{t.autoScanQr}</span>
+                            </button>
+                          </div>
+
+                          {/* Instructions for students (no expected token revealed) */}
+                          {!isAdminLoggedIn ? (
+                            <p className="text-[11px] text-stone-500 mt-1.5 flex items-center gap-1.5">
+                              <QrCode className="w-3.5 h-3.5 text-stone-400 shrink-0" />
+                              <span>
+                                {language === 'el'
+                                  ? 'Εντοπίστε την πινακίδα του σταθμού στο πεδίο και σαρώστε τον κωδικό QR με την κάμερα ή πληκτρολογήστε τον κωδικό.'
+                                  : 'Locate the station marker in the field and scan the QR code with your camera or enter the token.'}
+                              </span>
+                            </p>
+                          ) : (
+                            <p className="text-[11px] text-stone-400 mt-1">
+                              {t.expectedToken} <code className="text-stone-600 font-mono">{(activeQ as QRScanQuestion).qrPayload}</code>
+                            </p>
+                          )}
+
+                          {/* Invalid QR Token Alert (Does NOT reveal or display educational media) */}
+                          {isQrInvalid && (
+                            <div className="mt-2.5 p-3 bg-rose-50 border border-rose-300 rounded-xl text-rose-800 text-xs flex items-start gap-2">
+                              <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                              <div>
+                                <span className="font-bold block">
+                                  {language === 'el' ? 'Μη έγκυρος κωδικός σταθμού' : 'Invalid station QR token'}
+                                </span>
+                                <span>
+                                  {language === 'el'
+                                    ? 'Ο κωδικός QR που καταχωρήθηκε δεν αντιστοιχεί σε αυτόν τον σταθμό πεδίου. Παρακαλούμε ελέγξτε την πινακίδα του σταθμού και σαρώστε ξανά.'
+                                    : 'The scanned/entered QR token does not match this field station. Please check the physical station marker and scan again.'}
+                                </span>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Automatic Educational Media Display upon successful QR verification */}
+                        {isStationUnlocked && (
+                          <div className="pt-2 border-t border-stone-200 space-y-4">
+                            <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 px-3.5 py-2.5 rounded-xl">
+                              <div className="flex items-center gap-2">
+                                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                                <span>
+                                  {language === 'el'
+                                    ? '✓ Επιτυχής Ταυτοποίηση Σταθμού! Το εκπαιδευτικό υλικό ξεκλειδώθηκε:'
+                                    : '✓ Station Identified Successfully! Educational material unlocked:'}
+                                </span>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => setUserQrInput('')}
+                                className="text-[11px] font-semibold text-emerald-700 hover:text-emerald-900 underline cursor-pointer"
+                              >
+                                {language === 'el' ? 'Κλείσιμο υλικού' : 'Close media'}
+                              </button>
+                            </div>
+
+                            {resolvedStationMediaUrl ? (
+                              <div className="rounded-2xl overflow-hidden border border-stone-200 bg-stone-950 shadow-md">
+                                {resolvedStationMediaType === 'video' ? (
+                                  isYouTubeUrl(resolvedStationMediaUrl) ? (
+                                    <div className="aspect-video w-full max-h-96">
+                                      <iframe
+                                        src={getYouTubeEmbedUrl(resolvedStationMediaUrl)}
+                                        title={(activeQ as QRScanQuestion).stationName}
+                                        className="w-full h-full"
+                                        allowFullScreen
+                                      />
+                                    </div>
+                                  ) : (
+                                    <div className="p-2 bg-stone-950 flex flex-col items-center">
+                                      <video
+                                        src={resolvedStationMediaUrl}
+                                        controls
+                                        playsInline
+                                        className="w-full max-h-96 mx-auto rounded-xl bg-black shadow-inner"
+                                      />
+                                      <p className="text-[11px] text-stone-300 mt-2 flex items-center gap-1">
+                                        <Video className="w-3.5 h-3.5 text-amber-400" />
+                                        <span>
+                                          {language === 'el'
+                                            ? 'Εκπαιδευτικό βίντεο σταθμού πεδίου - Παρακολουθήστε προσεκτικά για την ολοκλήρωση της αποστολής'
+                                            : 'Field station educational video - Watch carefully to complete your mission'}
+                                        </span>
+                                      </p>
+                                    </div>
+                                  )
+                                ) : (
+                                  <div className="flex flex-col items-center p-3 bg-stone-900/70">
+                                    <img
+                                      src={resolvedStationMediaUrl}
+                                      alt={(activeQ as QRScanQuestion).stationName}
+                                      className="max-h-96 w-auto object-contain rounded-xl shadow-md"
+                                    />
+                                    <p className="text-[11px] text-stone-300 mt-2 italic text-center flex items-center gap-1">
+                                      <Camera className="w-3.5 h-3.5 text-amber-400" />
+                                      <span>
+                                        {language === 'el'
+                                          ? 'Εκπαιδευτικό φωτογραφικό υλικό σταθμού πεδίου'
+                                          : 'Field station educational photographic material'}
+                                      </span>
+                                    </p>
+                                  </div>
+                                )}
+                              </div>
+                            ) : (
+                              <div className="p-4 bg-stone-100 border border-stone-200 rounded-xl text-stone-600 text-xs flex items-center gap-2">
+                                <Info className="w-4 h-4 text-stone-500 shrink-0" />
+                                <span>
+                                  {language === 'el'
+                                    ? 'Ο κωδικός σταθμού επαληθεύτηκε επιτυχώς. Δεν έχει μεταφορτωθεί επιπρόσθετο εκπαιδευτικό βίντεο ή φωτογραφία για αυτόν τον σταθμό από τον εκπαιδευτικό.'
+                                    : 'Station token verified successfully. No additional educational video or photo has been uploaded for this station yet by the administrator.'}
+                                </span>
+                              </div>
+                            )}
+
+                            {/* Explicit Action to Continue after studying the station material */}
+                            <div className="pt-2 flex flex-wrap items-center justify-between gap-3 bg-white p-3.5 rounded-xl border border-stone-200">
+                              <p className="text-xs text-stone-600">
+                                {language === 'el'
+                                  ? 'Παρακολουθήστε το εκπαιδευτικό υλικό. Όταν είστε έτοιμοι, πατήστε συνέχεια για την επόμενη αποστολή.'
+                                  : 'Explore the educational material. When ready, proceed to the next mission.'}
+                              </p>
+                              <button
+                                type="button"
+                                onClick={handleCompleteStationAndContinue}
+                                className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white font-bold text-xs sm:text-sm rounded-xl transition-all shadow-xs flex items-center gap-2 cursor-pointer"
+                              >
+                                <CheckCircle2 className="w-4 h-4" />
+                                <span>{language === 'el' ? 'Συνέχεια στην Επόμενη Αποστολή' : 'Continue to Next Mission'}</span>
+                                <ChevronRight className="w-4 h-4" />
+                              </button>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Live Camera-Based QR Code Scanner Modal */}
+                        {isQRScannerOpen && (
+                          <QRCameraScanner
+                            expectedToken={(activeQ as QRScanQuestion).qrPayload}
+                            language={language}
+                            onScanSuccess={(decodedToken) => {
+                              setUserQrInput(decodedToken);
+                              setIsQRScannerOpen(false);
+                            }}
+                            onClose={() => setIsQRScannerOpen(false)}
+                          />
+                        )}
                       </div>
-                    </div>
-                  )}
+                    );
+                  })()}
 
                   {/* 7. Photo Upload Challenge & Team Reflection Activity */}
                   {activeQ.type === 'photo_upload' && (
@@ -3754,96 +4453,86 @@ function isYouTubeUrl(url: string): boolean {
                         </div>
                       )}
 
-                      <div className="bg-white p-4 rounded-xl border border-teal-100 space-y-2">
-                        <h5 className="text-xs font-bold text-stone-700 uppercase tracking-wider">
-                          {t.verificationCriteriaTitle}
-                        </h5>
-                        <ul className="text-xs text-stone-600 space-y-1">
-                          {(activeQ as PhotoUploadQuestion).verificationCriteria?.map((c, i) => (
-                            <li key={i} className="flex items-center gap-1.5">
-                              <CheckCircle2 className="w-3.5 h-3.5 text-teal-600 shrink-0" />
-                              <span>{c}</span>
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
 
-                      <div className="space-y-3">
-                        <div className="flex flex-wrap items-center gap-3">
-                          {/* Option 1: Take Photo directly via device camera */}
-                          <label className={`inline-flex items-center gap-2 px-4 py-2.5 bg-teal-600 hover:bg-teal-700 text-white rounded-xl text-xs font-semibold transition-colors shadow-2xs ${
-                            isAnswerSubmitted ? 'opacity-50 cursor-not-allowed pointer-events-none' : 'cursor-pointer'
-                          }`}>
-                            <Camera className="w-4 h-4" />
-                            <span>{t.takePhoto}</span>
-                            <input
-                              type="file"
-                              accept="image/*"
-                              capture="user"
-                              disabled={isAnswerSubmitted}
-                              className="hidden"
-                              onChange={async (e) => {
-                                if (e.target.files && e.target.files[0]) {
-                                  const file = e.target.files[0];
-                                  const compressedDataUrl = await compressAndResizeImage(file, 1200, 0.82);
-                                  if (compressedDataUrl) {
-                                    setUserUploadedDataUrl(compressedDataUrl);
-                                    setUserUploadedFile(file.name || 'camera-capture.jpg');
+                      {/* Photo Capture & Upload Controls (Only for authentic photo challenges, completely omitted for reflection questions) */}
+                      {!isReflectionQuestion(activeQ) && (
+                        <div className="space-y-3">
+                          <div className="flex flex-wrap items-center gap-3">
+                            {/* Option 1: Take Photo directly via device camera */}
+                            <label className={`inline-flex items-center gap-2 px-4 py-2.5 bg-teal-600 hover:bg-teal-700 text-white rounded-xl text-xs font-semibold transition-colors shadow-2xs ${
+                              isAnswerSubmitted ? 'opacity-50 cursor-not-allowed pointer-events-none' : 'cursor-pointer'
+                            }`}>
+                              <Camera className="w-4 h-4" />
+                              <span>{t.takePhoto}</span>
+                              <input
+                                type="file"
+                                accept="image/*"
+                                capture="user"
+                                disabled={isAnswerSubmitted}
+                                className="hidden"
+                                onChange={async (e) => {
+                                  if (e.target.files && e.target.files[0]) {
+                                    const file = e.target.files[0];
+                                    const compressedDataUrl = await compressAndResizeImage(file, 1200, 0.82);
+                                    if (compressedDataUrl) {
+                                      setUserUploadedDataUrl(compressedDataUrl);
+                                      setUserUploadedFile(file.name || 'camera-capture.jpg');
+                                    }
                                   }
-                                }
-                              }}
-                            />
-                          </label>
+                                }}
+                              />
+                            </label>
 
-                          {/* Option 2: Choose from Gallery */}
-                          <label className={`inline-flex items-center gap-2 px-4 py-2.5 bg-stone-700 hover:bg-stone-800 text-white rounded-xl text-xs font-semibold transition-colors shadow-2xs ${
-                            isAnswerSubmitted ? 'opacity-50 cursor-not-allowed pointer-events-none' : 'cursor-pointer'
-                          }`}>
-                            <ImageIcon className="w-4 h-4" />
-                            <span>{t.chooseFromGallery}</span>
-                            <input
-                              type="file"
-                              accept="image/*"
-                              disabled={isAnswerSubmitted}
-                              className="hidden"
-                              onChange={async (e) => {
-                                if (e.target.files && e.target.files[0]) {
-                                  const file = e.target.files[0];
-                                  const compressedDataUrl = await compressAndResizeImage(file, 1200, 0.82);
-                                  if (compressedDataUrl) {
-                                    setUserUploadedDataUrl(compressedDataUrl);
-                                    setUserUploadedFile(file.name);
+                            {/* Option 2: Choose from Gallery */}
+                            <label className={`inline-flex items-center gap-2 px-4 py-2.5 bg-stone-700 hover:bg-stone-800 text-white rounded-xl text-xs font-semibold transition-colors shadow-2xs ${
+                              isAnswerSubmitted ? 'opacity-50 cursor-not-allowed pointer-events-none' : 'cursor-pointer'
+                            }`}>
+                              <ImageIcon className="w-4 h-4" />
+                              <span>{t.chooseFromGallery}</span>
+                              <input
+                                type="file"
+                                accept="image/*"
+                                disabled={isAnswerSubmitted}
+                                className="hidden"
+                                onChange={async (e) => {
+                                  if (e.target.files && e.target.files[0]) {
+                                    const file = e.target.files[0];
+                                    const compressedDataUrl = await compressAndResizeImage(file, 1200, 0.82);
+                                    if (compressedDataUrl) {
+                                      setUserUploadedDataUrl(compressedDataUrl);
+                                      setUserUploadedFile(file.name);
+                                    }
                                   }
-                                }
-                              }}
-                            />
-                          </label>
+                                }}
+                              />
+                            </label>
 
-                          {userUploadedFile && (
-                            <span className="text-xs font-semibold text-teal-800 bg-teal-100 px-3 py-1.5 rounded-full border border-teal-200 flex items-center gap-1.5">
-                              <Check className="w-3.5 h-3.5 text-teal-600" />
-                              <span>{t.selectedFile} {userUploadedFile}</span>
-                            </span>
+                            {userUploadedFile && (
+                              <span className="text-xs font-semibold text-teal-800 bg-teal-100 px-3 py-1.5 rounded-full border border-teal-200 flex items-center gap-1.5">
+                                <Check className="w-3.5 h-3.5 text-teal-600" />
+                                <span>{t.selectedFile} {userUploadedFile}</span>
+                              </span>
+                            )}
+                          </div>
+
+                          {/* Live Photo Preview */}
+                          {userUploadedDataUrl && (
+                            <div className="flex items-center gap-3 p-3 bg-white rounded-xl border border-teal-200">
+                              <div className="w-20 h-16 rounded-lg overflow-hidden bg-stone-900 border border-teal-300 shrink-0">
+                                <img src={userUploadedDataUrl} alt="Preview" className="w-full h-full object-cover" />
+                              </div>
+                              <div className="min-w-0">
+                                <span className="text-xs font-bold text-teal-950 block truncate">
+                                  {t.authenticPhotoEvidence}
+                                </span>
+                                <span className="text-[11px] text-teal-700 block truncate">
+                                  {t.willLinkToPoster}
+                                </span>
+                              </div>
+                            </div>
                           )}
                         </div>
-
-                        {/* Live Photo Preview */}
-                        {userUploadedDataUrl && (
-                          <div className="flex items-center gap-3 p-3 bg-white rounded-xl border border-teal-200">
-                            <div className="w-20 h-16 rounded-lg overflow-hidden bg-stone-900 border border-teal-300 shrink-0">
-                              <img src={userUploadedDataUrl} alt="Preview" className="w-full h-full object-cover" />
-                            </div>
-                            <div className="min-w-0">
-                              <span className="text-xs font-bold text-teal-950 block truncate">
-                                {t.authenticPhotoEvidence}
-                              </span>
-                              <span className="text-[11px] text-teal-700 block truncate">
-                                {t.willLinkToPoster}
-                              </span>
-                            </div>
-                          </div>
-                        )}
-                      </div>
+                      )}
                     </div>
                   )}
 
@@ -3912,39 +4601,68 @@ function isYouTubeUrl(url: string): boolean {
 
                   {/* Submission & Action Bar */}
                   <div className="pt-4 border-t border-stone-200 flex flex-wrap items-center justify-between gap-4">
-                    <button
-                      disabled={
-                        isAnswerSubmitted ||
-                        isTimeExpired ||
-                        (!isAdminLoggedIn && isFeedbackPeriodActive) ||
-                        !isAnswerSelected ||
-                        Boolean(currentQ && submittedQuestionIds.includes(currentQ.id))
-                      }
-                      onClick={handleSubmitAnswer}
-                      title={
-                        !isAnswerSubmitted && !isAnswerSelected && !Boolean(currentQ && submittedQuestionIds.includes(currentQ.id))
-                          ? (language === 'en' ? 'Please select or provide an answer first' : 'Παρακαλούμε επιλέξτε πρώτα μία απάντηση')
-                          : undefined
-                      }
-                      className={`px-6 py-3 font-bold text-sm sm:text-base rounded-xl transition-all shadow-md flex items-center gap-2 cursor-pointer ${
-                        isTimeExpired
-                          ? 'bg-stone-400 text-stone-200 cursor-not-allowed'
+                    {activeQ.type === 'qr_scan' ? (
+                      (() => {
+                        const qrExpected = (activeQ as QRScanQuestion).qrPayload?.trim().toUpperCase() || '';
+                        const enteredQrClean = userQrInput.trim().toUpperCase();
+                        const isQrValidMatch = enteredQrClean.length > 0 && enteredQrClean === qrExpected;
+                        const isStationUnlocked = isQrValidMatch || Boolean(currentQ && submittedQuestionIds.includes(currentQ.id));
+
+                        return isStationUnlocked ? (
+                          <button
+                            onClick={handleCompleteStationAndContinue}
+                            className="px-6 py-3 font-bold text-sm sm:text-base rounded-xl transition-all shadow-md flex items-center gap-2 cursor-pointer bg-emerald-600 hover:bg-emerald-700 text-white"
+                          >
+                            <CheckCircle2 className="w-5 h-5" />
+                            <span>{language === 'en' ? 'Continue to Next Mission' : 'Συνέχεια στην Επόμενη Αποστολή'}</span>
+                            <ChevronRight className="w-4 h-4 ml-1" />
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => setIsQRScannerOpen(true)}
+                            className="px-6 py-3 font-bold text-sm sm:text-base rounded-xl transition-all shadow-md flex items-center gap-2 cursor-pointer bg-rose-600 hover:bg-rose-700 text-white"
+                          >
+                            <Camera className="w-5 h-5" />
+                            <span>{language === 'en' ? 'Scan Station QR Code' : 'Σάρωση QR Σταθμού'}</span>
+                          </button>
+                        );
+                      })()
+                    ) : (
+                      <button
+                        disabled={
+                          isAnswerSubmitted ||
+                          isTimeExpired ||
+                          (!isAdminLoggedIn && isFeedbackPeriodActive) ||
+                          !isAnswerSelected ||
+                          Boolean(currentQ && submittedQuestionIds.includes(currentQ.id))
+                        }
+                        onClick={handleSubmitAnswer}
+                        title={
+                          !isAnswerSubmitted && !isAnswerSelected && !Boolean(currentQ && submittedQuestionIds.includes(currentQ.id))
+                            ? (language === 'en' ? 'Please select or provide an answer first' : 'Παρακαλούμε επιλέξτε πρώτα μία απάντηση')
+                            : undefined
+                        }
+                        className={`px-6 py-3 font-bold text-sm sm:text-base rounded-xl transition-all shadow-md flex items-center gap-2 cursor-pointer ${
+                          isTimeExpired
+                            ? 'bg-stone-400 text-stone-200 cursor-not-allowed'
+                            : (isAnswerSubmitted || Boolean(currentQ && submittedQuestionIds.includes(currentQ.id)))
+                            ? 'bg-stone-300 text-stone-600 cursor-not-allowed'
+                            : !isAnswerSelected
+                            ? 'bg-stone-300 text-stone-500 cursor-not-allowed opacity-60'
+                            : 'bg-amber-600 hover:bg-amber-700 text-white disabled:opacity-50 disabled:cursor-not-allowed'
+                        }`}
+                      >
+                        <Check className="w-4 h-4" />
+                        {isTimeExpired
+                          ? (language === 'en' ? 'Time Expired (Closed)' : 'Ο χρόνος έληξε (Κλειστό)')
                           : (isAnswerSubmitted || Boolean(currentQ && submittedQuestionIds.includes(currentQ.id)))
-                          ? 'bg-stone-300 text-stone-600 cursor-not-allowed'
+                          ? (language === 'en' ? 'Answer Submitted' : 'Απάντηση Καταχωρήθηκε')
                           : !isAnswerSelected
-                          ? 'bg-stone-300 text-stone-500 cursor-not-allowed opacity-60'
-                          : 'bg-amber-600 hover:bg-amber-700 text-white disabled:opacity-50 disabled:cursor-not-allowed'
-                      }`}
-                    >
-                      <Check className="w-4 h-4" />
-                      {isTimeExpired
-                        ? (language === 'en' ? 'Time Expired (Closed)' : 'Ο χρόνος έληξε (Κλειστό)')
-                        : (isAnswerSubmitted || Boolean(currentQ && submittedQuestionIds.includes(currentQ.id)))
-                        ? (language === 'en' ? 'Answer Submitted' : 'Απάντηση Καταχωρήθηκε')
-                        : !isAnswerSelected
-                        ? (language === 'en' ? 'Select an Answer' : 'Επιλέξτε Απάντηση')
-                        : t.submitAnswer}
-                    </button>
+                          ? (language === 'en' ? 'Select an Answer' : 'Επιλέξτε Απάντηση')
+                          : t.submitAnswer}
+                      </button>
+                    )}
 
                     <div className="flex items-center gap-2">
                       <button
@@ -3965,15 +4683,25 @@ function isYouTubeUrl(url: string): boolean {
                         {t.resetButton}
                       </button>
                       <button
-                        onClick={handleNextQuestion}
-                        disabled={!isAdminLoggedIn && (!isAnswerSubmitted && !Boolean(currentQ && submittedQuestionIds.includes(currentQ.id)) || isFeedbackPeriodActive)}
+                        onClick={activeQ.type === 'qr_scan' ? handleCompleteStationAndContinue : handleNextQuestion}
+                        disabled={
+                          activeQ.type === 'qr_scan'
+                            ? !isAdminLoggedIn && !(userQrInput.trim().toUpperCase() === ((activeQ as QRScanQuestion).qrPayload?.trim().toUpperCase()) || Boolean(currentQ && submittedQuestionIds.includes(currentQ.id)))
+                            : !isAdminLoggedIn && (!isAnswerSubmitted && !Boolean(currentQ && submittedQuestionIds.includes(currentQ.id)) || isFeedbackPeriodActive)
+                        }
                         className={`px-4 py-2 text-xs font-semibold rounded-lg flex items-center gap-1 transition-all ${
-                          !isAdminLoggedIn && (!isAnswerSubmitted && !Boolean(currentQ && submittedQuestionIds.includes(currentQ.id)) || isFeedbackPeriodActive)
-                            ? 'bg-stone-200 text-stone-400 cursor-not-allowed opacity-40'
-                            : 'bg-stone-900 text-white hover:bg-stone-800 cursor-pointer'
+                          activeQ.type === 'qr_scan'
+                            ? (!isAdminLoggedIn && !(userQrInput.trim().toUpperCase() === ((activeQ as QRScanQuestion).qrPayload?.trim().toUpperCase()) || Boolean(currentQ && submittedQuestionIds.includes(currentQ.id)))
+                                ? 'bg-stone-200 text-stone-400 cursor-not-allowed opacity-40'
+                                : 'bg-stone-900 text-white hover:bg-stone-800 cursor-pointer')
+                            : (!isAdminLoggedIn && (!isAnswerSubmitted && !Boolean(currentQ && submittedQuestionIds.includes(currentQ.id)) || isFeedbackPeriodActive)
+                                ? 'bg-stone-200 text-stone-400 cursor-not-allowed opacity-40'
+                                : 'bg-stone-900 text-white hover:bg-stone-800 cursor-pointer')
                         }`}
                         title={
-                          !isAdminLoggedIn && !isAnswerSubmitted && !Boolean(currentQ && submittedQuestionIds.includes(currentQ.id))
+                          activeQ.type === 'qr_scan' && !isAdminLoggedIn && !(userQrInput.trim().toUpperCase() === ((activeQ as QRScanQuestion).qrPayload?.trim().toUpperCase()) || Boolean(currentQ && submittedQuestionIds.includes(currentQ.id)))
+                            ? (language === 'en' ? 'Scan station QR code to unlock and continue' : 'Σαρώστε τον κωδικό QR του σταθμού για να συνεχίσετε')
+                            : !isAdminLoggedIn && !isAnswerSubmitted && !Boolean(currentQ && submittedQuestionIds.includes(currentQ.id))
                             ? (language === 'en' ? 'Submit your answer before continuing' : 'Υποβάλετε πρώτα την απάντηση για να συνεχίσετε')
                             : !isAdminLoggedIn && isFeedbackPeriodActive
                             ? (language === 'en' ? 'Reviewing explanation (auto-advancing)...' : 'Ανάγνωση επεξήγησης (αυτόματη μετάβαση)...')
@@ -3985,8 +4713,8 @@ function isYouTubeUrl(url: string): boolean {
                     </div>
                   </div>
 
-                  {/* Scientific Explanation Card (Visible upon submission) */}
-                  {(isAnswerSubmitted || Boolean(currentQ && submittedQuestionIds.includes(currentQ.id))) && (
+                  {/* Scientific Explanation Card (Visible upon submission for standard questions) */}
+                  {activeQ.type !== 'qr_scan' && (isAnswerSubmitted || Boolean(currentQ && submittedQuestionIds.includes(currentQ.id))) && (
                     <div
                       className={`p-6 rounded-2xl border transition-all ${
                         (currentQ && submittedAnswers[currentQ.id] !== undefined
@@ -4050,6 +4778,8 @@ function isYouTubeUrl(url: string): boolean {
                 </button>
               </div>
             )}
+              </>
+            )}
           </div>
         )}
 
@@ -4086,6 +4816,15 @@ function isYouTubeUrl(url: string): boolean {
                 {isAdminLoggedIn && (
                   <>
                     <button
+                      onClick={handleRefreshPosters}
+                      className="px-3.5 py-2.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-bold text-xs sm:text-sm rounded-xl border border-emerald-300 transition-colors flex items-center gap-1.5 cursor-pointer shadow-xs"
+                      title={language === 'en' ? 'Sync posters from student devices' : 'Συγχρονισμός αφισών από τις συσκευές μαθητών'}
+                    >
+                      <RefreshCw className="w-4 h-4 text-emerald-600" />
+                      {language === 'en' ? 'Sync Posters' : 'Συγχρονισμός'}
+                    </button>
+
+                    <button
                       onClick={() => {
                         const idx = Object.keys(posters).indexOf(selectedPosterTeamId);
                         handleOpenPresentation(idx >= 0 ? idx : 0);
@@ -4103,55 +4842,74 @@ function isYouTubeUrl(url: string): boolean {
                       <FileSpreadsheet className="w-4 h-4 text-purple-700" />
                       {language === 'en' ? 'Export Reports' : 'Εξαγωγή Αναφορών'}
                     </button>
+
+                    <button
+                      onClick={() => setIsClearGameDataOpen(true)}
+                      className="px-3.5 py-2.5 bg-rose-50 hover:bg-rose-100 text-rose-800 hover:text-rose-900 font-bold text-xs sm:text-sm rounded-xl border border-rose-300 transition-colors flex items-center gap-1.5 cursor-pointer shadow-xs"
+                      title={
+                        language === 'en'
+                          ? 'New Game – Clear Previous Game Data'
+                          : 'Νέο παιχνίδι – Καθαρισμός προηγούμενων δεδομένων'
+                      }
+                    >
+                      <RotateCcw className="w-4 h-4 text-rose-600" />
+                      <span>
+                        {language === 'en'
+                          ? 'New Game – Clear Previous Game Data'
+                          : 'Νέο παιχνίδι – Καθαρισμός προηγούμενων δεδομένων'}
+                      </span>
+                    </button>
                   </>
                 )}
               </div>
             </div>
 
-            {/* Team Poster Selector Pills */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              {teams.map((team) => {
-                const isSelected = selectedPosterTeamId === team.id;
-                const p = posters[team.id];
+            {/* Team Poster Selector Pills - Admin only, students are locked to their own team */}
+            {isAdminLoggedIn && (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                {teams.map((team) => {
+                  const isSelected = selectedPosterTeamId === team.id;
+                  const p = posters[team.id];
 
-                return (
-                  <button
-                    key={team.id}
-                    onClick={() => setSelectedPosterTeamId(team.id)}
-                    className={`p-3.5 rounded-2xl border text-left transition-all flex items-center gap-3 cursor-pointer ${
-                      isSelected
-                        ? 'border-amber-500 bg-white ring-2 ring-amber-400 shadow-sm'
-                        : 'border-stone-200 bg-stone-50 hover:bg-white'
-                    }`}
-                  >
-                    <div
-                      className="w-10 h-10 rounded-xl flex items-center justify-center text-xl shrink-0"
-                      style={{ backgroundColor: `${team.color}15`, color: team.color }}
+                  return (
+                    <button
+                      key={team.id}
+                      onClick={() => setSelectedPosterTeamId(team.id)}
+                      className={`p-3.5 rounded-2xl border text-left transition-all flex items-center gap-3 cursor-pointer ${
+                        isSelected
+                          ? 'border-amber-500 bg-white ring-2 ring-amber-400 shadow-sm'
+                          : 'border-stone-200 bg-stone-50 hover:bg-white'
+                      }`}
                     >
-                      {team.avatar}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center justify-between">
-                        <span
-                          className="text-[10px] font-black uppercase tracking-wider"
-                          style={{ color: team.color }}
-                        >
-                          {language === 'en' ? `TEAM ${team.number}` : `ΟΜΑΔΑ ${team.number}`}
-                        </span>
-                        {p && (
-                          <span className="text-[10px] font-bold text-stone-500">
-                            {p.score} pts
+                      <div
+                        className="w-10 h-10 rounded-xl flex items-center justify-center text-xl shrink-0"
+                        style={{ backgroundColor: `${team.color}15`, color: team.color }}
+                      >
+                        {team.avatar}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center justify-between">
+                          <span
+                            className="text-[10px] font-black uppercase tracking-wider"
+                            style={{ color: team.color }}
+                          >
+                            {language === 'en' ? `TEAM ${team.number}` : `ΟΜΑΔΑ ${team.number}`}
                           </span>
-                        )}
+                          {p && (
+                            <span className="text-[10px] font-bold text-stone-500">
+                              {p.score} pts
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-xs font-bold text-stone-900 truncate">
+                          {language === 'en' ? (team.titleEn || team.title) : team.title}
+                        </div>
                       </div>
-                      <div className="text-xs font-bold text-stone-900 truncate">
-                        {language === 'en' ? (team.titleEn || team.title) : team.title}
-                      </div>
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
 
             {/* Active Team Poster Display */}
             {currentPosterData && (
@@ -4612,6 +5370,7 @@ function isYouTubeUrl(url: string): boolean {
         language={language}
         allSubmissions={teamPhotoSubmissions}
         allQuestions={questions}
+        onRefresh={handleRefreshPosters}
       />
 
       {/* 5. Admin Report Modal (PDF / CSV / JSON) */}
@@ -4676,6 +5435,14 @@ function isYouTubeUrl(url: string): boolean {
           setHasDismissedExpiredModal(true);
           setActiveTab('arena');
         }}
+      />
+
+      {/* 10. Clear Game Data for New Game Modal */}
+      <ClearGameDataModal
+        isOpen={isClearGameDataOpen}
+        onClose={() => setIsClearGameDataOpen(false)}
+        onConfirmClear={handleConfirmClearGameData}
+        language={language}
       />
 
       {/* Toast Notification for Export Actions */}

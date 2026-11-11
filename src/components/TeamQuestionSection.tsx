@@ -286,6 +286,16 @@ export const TeamQuestionSection: React.FC<TeamQuestionSectionProps> = ({
                                       {q.mediaType === 'video' ? '🎥 ' + t.mediaTypeVideo : '📷 ' + t.mediaTypeImage}
                                     </span>
                                   )}
+                                  {q.type === 'qr_scan' && (
+                                    <span className="text-[10px] font-mono px-2 py-0.5 rounded-md bg-rose-50 text-rose-800 border border-rose-200 font-bold">
+                                      🎟️ {(q as any).qrPayload}
+                                    </span>
+                                  )}
+                                  {q.type === 'qr_scan' && !q.mediaUrl && (
+                                    <span className="text-[10px] px-2 py-0.5 rounded-md bg-stone-100 text-stone-500 border border-stone-200">
+                                      {isEn ? '⚠️ No Media Assigned' : '⚠️ Χωρίς Εκπ. Υλικό'}
+                                    </span>
+                                  )}
                                   <span className="text-[10px] font-mono text-stone-400">
                                     #{globalIdx + 1}
                                   </span>
@@ -489,6 +499,16 @@ export const TeamQuestionSection: React.FC<TeamQuestionSectionProps> = ({
                                   {q.mediaUrl && (
                                     <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-blue-100 text-blue-800 border border-blue-200 flex items-center gap-1">
                                       {q.mediaType === 'video' ? '🎥 ' + t.mediaTypeVideo : '📷 ' + t.mediaTypeImage}
+                                    </span>
+                                  )}
+                                  {q.type === 'qr_scan' && (
+                                    <span className="text-[10px] font-mono px-2 py-0.5 rounded-md bg-rose-50 text-rose-800 border border-rose-200 font-bold">
+                                      🎟️ {(q as any).qrPayload}
+                                    </span>
+                                  )}
+                                  {q.type === 'qr_scan' && !q.mediaUrl && (
+                                    <span className="text-[10px] px-2 py-0.5 rounded-md bg-stone-100 text-stone-500 border border-stone-200">
+                                      {isEn ? '⚠️ No Media Assigned' : '⚠️ Χωρίς Εκπ. Υλικό'}
                                     </span>
                                   )}
                                   <span className="text-[10px] font-mono text-stone-400">

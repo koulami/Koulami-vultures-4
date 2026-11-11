@@ -62,7 +62,7 @@ export const AdminReportModal: React.FC<AdminReportModalProps> = ({
       `"${p.teamNumber}"`,
       `"${p.teamTitle}"`,
       `"${p.teamTitleEn}"`,
-      `"${p.members.join('; ')}"`,
+      `"${Array.isArray(p.members) ? p.members.join('; ') : (typeof p.members === 'string' ? p.members : '')}"`,
       `"${p.score}"`,
       `"${p.completedQuestsCount}"`,
       `"${p.totalQuestsCount}"`,
@@ -314,7 +314,7 @@ export const AdminReportModal: React.FC<AdminReportModalProps> = ({
                         {isEn ? (p.teamTitleEn || p.teamTitle) : p.teamTitle}
                       </td>
                       <td className="py-3 px-4 text-stone-600">
-                        {p.members.join(', ')}
+                        {Array.isArray(p.members) ? p.members.join(', ') : (typeof p.members === 'string' ? p.members : '')}
                       </td>
                       <td className="py-3 px-4 font-black text-amber-600 whitespace-nowrap">
                         {p.score} pts

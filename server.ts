@@ -6,6 +6,7 @@
 import express, { Request, Response } from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import fs from 'fs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -263,6 +264,141 @@ app.get('/api/game/stream', (req: Request, res: Response) => {
 setInterval(() => {
   checkExpiration();
 }, 1000);
+
+// ---------------------------------------------------------------------------
+// 8. Station Media Cross-Device Storage (Allows student devices to fetch media)
+// ---------------------------------------------------------------------------
+const uploadsDir = path.resolve(__dirname, 'uploads', 'station-media');
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
+// Upload station media (photo or video) from administrator device
+app.post('/api/station-media/:token', (req: Request, res: Response) => {
+  const rawToken = req.params.token;
+  if (!rawToken) {
+    return res.status(400).json({ success: false, message: 'Station token required' });
+  }
+
+  const token = rawToken.trim().toUpperCase();
+  const safeToken = token.replace(/[^a-zA-Z0-9_-]/g, '_');
+  const mediaTypeHeader = (req.headers['x-media-type'] as string) || '';
+  const fileNameHeader = (req.headers['x-file-name'] as string) || '';
+  const contentType = (req.headers['content-type'] as string) || 'application/octet-stream';
+
+  const isVideo = contentType.startsWith('video/') || mediaTypeHeader === 'video';
+  const mediaType = isVideo ? 'video' : 'image';
+  const fileName = fileNameHeader ? decodeURIComponent(fileNameHeader) : (isVideo ? 'station-video.mp4' : 'station-photo.jpg');
+
+  const ext = path.extname(fileName) || (isVideo ? '.mp4' : '.jpg');
+  const filePath = path.join(uploadsDir, `${safeToken}${ext}`);
+  const metaPath = path.join(uploadsDir, `${safeToken}.meta.json`);
+
+  const writeStream = fs.createWriteStream(filePath);
+  req.pipe(writeStream);
+
+  writeStream.on('finish', () => {
+    const meta = {
+      token,
+      mediaType,
+      fileName,
+      mimeType: contentType,
+      filePath,
+      url: `/api/station-media/${encodeURIComponent(token)}`,
+      updatedAt: Date.now(),
+    };
+
+    fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+    res.json({
+      success: true,
+      message: 'Media saved successfully on server for cross-device access',
+      url: meta.url,
+      meta,
+    });
+  });
+
+  writeStream.on('error', (err) => {
+    res.status(500).json({ success: false, message: 'Failed to write media file', error: err.message });
+  });
+});
+
+// Retrieve station media by token (with HTTP 206 range request support for video playback)
+app.get('/api/station-media/:token', (req: Request, res: Response) => {
+  const rawToken = req.params.token;
+  if (!rawToken) return res.status(400).send('Station token required');
+
+  const token = rawToken.trim().toUpperCase();
+  const safeToken = token.replace(/[^a-zA-Z0-9_-]/g, '_');
+  const metaPath = path.join(uploadsDir, `${safeToken}.meta.json`);
+
+  if (!fs.existsSync(metaPath)) {
+    return res.status(404).send('No media uploaded for this station token');
+  }
+
+  try {
+    const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+    if (!fs.existsSync(meta.filePath)) {
+      return res.status(404).send('Media file missing on server');
+    }
+
+    res.setHeader('Content-Type', meta.mimeType || 'application/octet-stream');
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.sendFile(meta.filePath);
+  } catch (err: any) {
+    res.status(500).send('Error retrieving media: ' + err.message);
+  }
+});
+
+// Check metadata / existence of station media on server
+app.get('/api/station-media-info/:token', (req: Request, res: Response) => {
+  const rawToken = req.params.token;
+  if (!rawToken) return res.json({ exists: false });
+
+  const token = rawToken.trim().toUpperCase();
+  const safeToken = token.replace(/[^a-zA-Z0-9_-]/g, '_');
+  const metaPath = path.join(uploadsDir, `${safeToken}.meta.json`);
+
+  if (fs.existsSync(metaPath)) {
+    try {
+      const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+      if (fs.existsSync(meta.filePath)) {
+        return res.json({
+          exists: true,
+          token: meta.token,
+          mediaType: meta.mediaType,
+          mimeType: meta.mimeType,
+          fileName: meta.fileName,
+          url: `/api/station-media/${encodeURIComponent(token)}`,
+          updatedAt: meta.updatedAt,
+        });
+      }
+    } catch {}
+  }
+
+  return res.json({ exists: false });
+});
+
+// Delete station media from server
+app.delete('/api/station-media/:token', (req: Request, res: Response) => {
+  const rawToken = req.params.token;
+  if (!rawToken) return res.status(400).json({ success: false });
+
+  const token = rawToken.trim().toUpperCase();
+  const safeToken = token.replace(/[^a-zA-Z0-9_-]/g, '_');
+  const metaPath = path.join(uploadsDir, `${safeToken}.meta.json`);
+
+  if (fs.existsSync(metaPath)) {
+    try {
+      const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+      if (meta.filePath && fs.existsSync(meta.filePath)) {
+        fs.unlinkSync(meta.filePath);
+      }
+      fs.unlinkSync(metaPath);
+    } catch {}
+  }
+
+  res.json({ success: true, message: 'Media removed from server' });
+});
 
 // Vite middleware or static serving
 async function setupServer() {

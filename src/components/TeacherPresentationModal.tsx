@@ -18,6 +18,7 @@ import {
   Sparkles,
   Layers,
   HelpCircle,
+  RotateCw,
 } from 'lucide-react';
 
 interface TeacherPresentationModalProps {
@@ -28,6 +29,7 @@ interface TeacherPresentationModalProps {
   language?: 'el' | 'en';
   allSubmissions?: TeamPhotoSubmission[];
   allQuestions?: Question[];
+  onRefresh?: () => Promise<void> | void;
 }
 
 export const TeacherPresentationModal: React.FC<TeacherPresentationModalProps> = ({
@@ -38,10 +40,12 @@ export const TeacherPresentationModal: React.FC<TeacherPresentationModalProps> =
   language = 'el',
   allSubmissions = [],
   allQuestions = [],
+  onRefresh,
 }) => {
   const [currentIndex, setCurrentIndex] = useState<number>(initialIndex);
   const [isAutoPlay, setIsAutoPlay] = useState<boolean>(false);
   const [highContrast, setHighContrast] = useState<boolean>(false);
+  const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
 
   useEffect(() => {
     setCurrentIndex(initialIndex);
@@ -161,6 +165,24 @@ export const TeacherPresentationModal: React.FC<TeacherPresentationModalProps> =
             {highContrast ? (isEn ? 'Natural' : 'Φυσικό') : (isEn ? 'High Contrast' : 'Υψηλή Αντίθεση')}
           </button>
 
+          {/* Sync / Refresh from student devices */}
+          {onRefresh && (
+            <button
+              onClick={async () => {
+                setIsRefreshing(true);
+                try {
+                  await onRefresh();
+                } finally {
+                  setTimeout(() => setIsRefreshing(false), 500);
+                }
+              }}
+              className="p-2 rounded-xl bg-stone-800 text-stone-300 border border-stone-700 hover:bg-stone-700 cursor-pointer"
+              title={isEn ? 'Refresh posters from student devices' : 'Συγχρονισμός αφισών από τις συσκευές μαθητών'}
+            >
+              <RotateCw className={`w-4 h-4 text-emerald-400 ${isRefreshing ? 'animate-spin' : ''}`} />
+            </button>
+          )}
+
           {/* Print current poster */}
           <button
             onClick={() => window.print()}
@@ -220,17 +242,20 @@ export const TeacherPresentationModal: React.FC<TeacherPresentationModalProps> =
             {currentPoster.teamAvatar} {isEn ? `Team ${currentPoster.teamNumber}: ` : `Ομάδα ${currentPoster.teamNumber}: `}
             {isEn ? (currentPoster.teamTitleEn || currentPoster.teamTitle) : currentPoster.teamTitle}
           </span>
-          {Array.isArray(currentPoster.members) &&
-            currentPoster.members.some((m) => typeof m === 'string' && m.trim().length > 0) && (
+          {(() => {
+            const list = Array.isArray(currentPoster.members)
+              ? currentPoster.members.filter((m) => typeof m === 'string' && m.trim().length > 0)
+              : typeof currentPoster.members === 'string' && (currentPoster.members as string).trim().length > 0
+              ? [(currentPoster.members as string).trim()]
+              : [];
+            if (list.length === 0) return null;
+            return (
               <>
                 <span>•</span>
-                <span>
-                  {currentPoster.members
-                    .filter((m) => typeof m === 'string' && m.trim().length > 0)
-                    .join(', ')}
-                </span>
+                <span>{list.join(', ')}</span>
               </>
-            )}
+            );
+          })()}
         </div>
 
         <div className="hidden sm:flex items-center gap-3 font-mono text-[11px] text-stone-500">

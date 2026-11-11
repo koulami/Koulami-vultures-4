@@ -24,7 +24,18 @@ import {
   Eye,
   Target,
   FileCheck,
+  QrCode,
+  Download,
+  AlertTriangle,
 } from 'lucide-react';
+import { QRCodeCanvas } from 'qrcode.react';
+import {
+  saveStationMediaBlob,
+  getStationMediaBlobUrl,
+  deleteStationMediaBlob,
+  SaveStationMediaResult,
+} from '../utils/qrStationMediaStorage';
+import { compressAndResizeImage } from '../utils/teamPhotoManager';
 import { Language, translations } from '../i18n/translations';
 
 interface EditQuestionModalProps {
@@ -78,6 +89,9 @@ export const EditQuestionModal: React.FC<EditQuestionModalProps> = ({
   const [mediaType, setMediaType] = useState<'image' | 'video' | 'none'>('none');
   const [mediaUrl, setMediaUrl] = useState<string>('');
   const [uploadedFileName, setUploadedFileName] = useState<string>('');
+  const [uploadWarning, setUploadWarning] = useState<string | null>(null);
+  const [isUploading, setIsUploading] = useState<boolean>(false);
+  const [isServerStored, setIsServerStored] = useState<boolean>(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Options for multiple choice single / multi
@@ -138,8 +152,62 @@ export const EditQuestionModal: React.FC<EditQuestionModalProps> = ({
         setTfCorrect((questionToEdit as TrueFalseQuestion).correctAnswer);
       } else if (questionToEdit.type === 'qr_scan') {
         const qr = questionToEdit as QRScanQuestion;
+        const normToken = (qr.qrPayload || '').trim().toUpperCase();
         setQrPayload(qr.qrPayload);
         setStationName(qr.stationName);
+
+        // Retrieve existing QR station media: Check server first for central cross-device truth
+        if (normToken) {
+          fetch(`/api/station-media-info/${encodeURIComponent(normToken)}?_t=${Date.now()}`, { cache: 'no-store' })
+            .then((res) => (res.ok ? res.json() : null))
+            .then((info) => {
+              if (info && info.exists && info.url) {
+                const isRealMedia = typeof info.size !== 'number' || info.size > 500;
+                setMediaType(info.mediaType || 'video');
+                setMediaUrl(info.url);
+                if (isRealMedia) {
+                  setIsServerStored(true);
+                  const sizeMb = typeof info.size === 'number' ? ` (${(info.size / (1024 * 1024)).toFixed(2)} MB)` : '';
+                  setUploadedFileName((info.fileName || (info.mediaType === 'video' ? 'station-video.mp4' : 'station-photo.jpg')) + sizeMb);
+                  setUploadWarning(null);
+                } else {
+                  // It's the 60-byte placeholder
+                  setIsServerStored(false);
+                  setUploadedFileName(`${info.fileName || 'axies_English_subtitles.mp4'} (Εικονικό αρχείο ${info.size} bytes - Απαιτείται μεταφόρτωση)`);
+                  setUploadWarning(
+                    language === 'el'
+                      ? 'Στον διακομιστή υπάρχει προσωρινό εικονικό αρχείο (60 bytes). Επιλέξτε το κανονικό βίντεο axies_English_subtitles.mp4 (7.38 MB) για μόνιμη αποθήκευση.'
+                      : 'Server contains a placeholder file (60 bytes). Please upload the actual video axies_English_subtitles.mp4 (7.38 MB).'
+                  );
+                }
+                return;
+              }
+
+              // Fallback: Check local IndexedDB Blob if mediaUrl indicates an IndexedDB reference
+              if (questionToEdit.mediaUrl && questionToEdit.mediaUrl.startsWith('idb://')) {
+                getStationMediaBlobUrl(normToken).then((blobUrl) => {
+                  if (blobUrl) {
+                    setMediaUrl(blobUrl);
+                    setMediaType(questionToEdit.mediaType || 'video');
+                    setUploadedFileName('Αποθηκευμένο εκπαιδευτικό αρχείο σταθμού (τοπικό)');
+                    setIsServerStored(false);
+                  }
+                });
+              }
+            })
+            .catch(() => {
+              if (questionToEdit.mediaUrl && questionToEdit.mediaUrl.startsWith('idb://')) {
+                getStationMediaBlobUrl(normToken).then((blobUrl) => {
+                  if (blobUrl) {
+                    setMediaUrl(blobUrl);
+                    setMediaType(questionToEdit.mediaType || 'video');
+                    setUploadedFileName('Αποθηκευμένο εκπαιδευτικό αρχείο σταθμού (τοπικό)');
+                    setIsServerStored(false);
+                  }
+                });
+              }
+            });
+        }
       }
     } else {
       // Default empty question
@@ -155,6 +223,8 @@ export const EditQuestionModal: React.FC<EditQuestionModalProps> = ({
       setMediaType('none');
       setMediaUrl('');
       setUploadedFileName('');
+      setUploadWarning(null);
+      setIsServerStored(false);
       setMcOptions([
         { id: 'opt-1', text: '' },
         { id: 'opt-2', text: '' },
@@ -172,31 +242,139 @@ export const EditQuestionModal: React.FC<EditQuestionModalProps> = ({
   if (!isOpen) return null;
 
   // Handle local file upload (photo or video from user's files)
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
     setUploadedFileName(file.name);
+    setUploadWarning(null);
 
-    if (file.type.startsWith('video/')) {
+    // Reliable video detection: check MIME type OR file extension (.mp4, .webm, .mov, .m4v)
+    const fileNameLower = file.name.toLowerCase();
+    const isVideoExtension = /\.(mp4|webm|mov|m4v)$/i.test(fileNameLower);
+    const isImageExtension = /\.(jpg|jpeg|png|gif|webp|svg|bmp)$/i.test(fileNameLower);
+    const isVideo = file.type.startsWith('video/') || isVideoExtension;
+    const isImage = !isVideo && (file.type.startsWith('image/') || isImageExtension);
+
+    if (isVideo) {
       setMediaType('video');
-    } else if (file.type.startsWith('image/')) {
-      setMediaType('image');
-    }
+      setIsUploading(true);
+      try {
+        const token = type === 'qr_scan'
+          ? (qrPayload.trim().toUpperCase() || 'VA-PARK-VALUES-2026')
+          : (questionToEdit?.id || 'video-file');
+        const uploadResult = await saveStationMediaBlob(token, file, 'video', file.name, (warn) => {
+          setUploadWarning(warn);
+        });
 
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === 'string') {
-        setMediaUrl(reader.result);
+        if (uploadResult.serverSaved) {
+          setIsServerStored(true);
+          setMediaUrl(uploadResult.url);
+          const sizeMb = (file.size / (1024 * 1024)).toFixed(2);
+          setUploadedFileName(`${file.name} (${sizeMb} MB)`);
+          setUploadWarning(null);
+        } else {
+          setIsServerStored(false);
+          setMediaUrl(uploadResult.url);
+          setUploadedFileName(`${file.name} (Αποτυχία αποθήκευσης στον διακομιστή)`);
+          setUploadWarning(uploadResult.warning || uploadResult.error || 'Αποτυχία οριστικής αποθήκευσης στον διακομιστή.');
+        }
+      } catch (err: any) {
+        setIsServerStored(false);
+        console.warn('Failed to upload video to server:', err);
+        setUploadWarning('Σφάλμα αποθήκευσης αρχείου: ' + (err?.message || 'Αποτυχία'));
+        setMediaUrl(URL.createObjectURL(file));
+      } finally {
+        setIsUploading(false);
+        // Reset file input value so selecting the exact same file immediately triggers handleFileUpload again
+        if (fileInputRef.current) {
+          fileInputRef.current.value = '';
+        }
       }
-    };
-    reader.readAsDataURL(file);
+    } else if (isImage) {
+      setMediaType('image');
+      try {
+        if (type === 'qr_scan') {
+          setIsUploading(true);
+          const token = qrPayload.trim().toUpperCase() || questionToEdit?.id || 'image-file';
+          const uploadResult = await saveStationMediaBlob(token, file, 'image', file.name, (warn) => {
+            setUploadWarning(warn);
+          });
+          if (uploadResult.serverSaved) {
+            setIsServerStored(true);
+            setMediaUrl(uploadResult.url);
+            setUploadedFileName(file.name);
+            setUploadWarning(null);
+          } else {
+            setIsServerStored(false);
+            setMediaUrl(uploadResult.url);
+            setUploadedFileName(`${file.name} (Αποτυχία αποθήκευσης στον διακομιστή)`);
+            setUploadWarning(uploadResult.warning || uploadResult.error || 'Αποτυχία αποθήκευσης στον διακομιστή.');
+          }
+        } else {
+          setIsServerStored(false);
+          const compressed = await compressAndResizeImage(file, 1200, 0.82);
+          setMediaUrl(compressed || URL.createObjectURL(file));
+        }
+      } catch {
+        const reader = new FileReader();
+        reader.onload = () => {
+          if (typeof reader.result === 'string') {
+            setMediaUrl(reader.result);
+          }
+        };
+        reader.readAsDataURL(file);
+      } finally {
+        setIsUploading(false);
+        if (fileInputRef.current) {
+          fileInputRef.current.value = '';
+        }
+      }
+    } else {
+      setUploadWarning(
+        language === 'el'
+          ? 'Μη αναγνωρίσιμος τύπος αρχείου. Υποστηρίζονται αρχεία βίντεο (.mp4, .webm, .mov, .m4v) και εικόνας (.jpg, .png, .webp).'
+          : 'Unrecognized file format. Supported formats: videos (.mp4, .webm, .mov, .m4v) and images (.jpg, .png, .webp).'
+      );
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
   };
 
   const handleTriggerFilePicker = () => {
     if (fileInputRef.current) {
+      fileInputRef.current.value = '';
       fileInputRef.current.click();
     }
+  };
+
+  const handleRemoveMedia = async () => {
+    if (type === 'qr_scan' && qrPayload) {
+      await deleteStationMediaBlob(qrPayload.trim().toUpperCase());
+    }
+    setMediaUrl('');
+    setUploadedFileName('');
+    setUploadWarning(null);
+    setMediaType('none');
+    setIsServerStored(false);
+  };
+
+  const handleDownloadQrCode = () => {
+    const cleanToken = qrPayload.trim();
+    if (!cleanToken) return;
+
+    const canvas = document.getElementById('station-printable-qr-canvas') as HTMLCanvasElement | null;
+    if (!canvas) return;
+
+    const dataUrl = canvas.toDataURL('image/png');
+    const downloadLink = document.createElement('a');
+    downloadLink.href = dataUrl;
+    const safeFilename = cleanToken.replace(/[^a-zA-Z0-9_-]/g, '_');
+    downloadLink.download = `QR-${safeFilename}.png`;
+    document.body.appendChild(downloadLink);
+    downloadLink.click();
+    document.body.removeChild(downloadLink);
   };
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -204,7 +382,64 @@ export const EditQuestionModal: React.FC<EditQuestionModalProps> = ({
 
     const baseId = questionToEdit?.id || `q-custom-${Date.now()}`;
     const cleanMediaType = mediaUrl.trim() !== '' ? mediaType : 'none';
-    const cleanMediaUrl = mediaType !== 'none' ? mediaUrl.trim() : '';
+    let cleanMediaUrl = mediaType !== 'none' ? mediaUrl.trim() : '';
+
+    // If media is for a QR station:
+    if (type === 'qr_scan') {
+      const normToken = qrPayload.trim().toUpperCase();
+      if (cleanMediaUrl.startsWith('blob:')) {
+        if (isServerStored) {
+          cleanMediaUrl = `/api/station-media/${encodeURIComponent(normToken)}`;
+        } else {
+          // Do not commit a failed upload as a valid server reference
+          setUploadWarning(
+            language === 'el'
+              ? '⚠️ Αδυναμία αποθήκευσης ερώτησης: Το αρχείο πολυμέσων δεν έχει αποθηκευτεί επιτυχώς στον κεντρικό διακομιστή. Παρακαλούμε επιλέξτε και μεταφορτώστε ξανά το αρχείο πριν την αποθήκευση της ερώτησης.'
+              : '⚠️ Cannot save question: The media file was not successfully saved to the central server. Please re-upload the file before saving.'
+          );
+          return;
+        }
+      } else if (cleanMediaUrl.startsWith('/api/station-media/')) {
+        cleanMediaUrl = `/api/station-media/${encodeURIComponent(normToken)}`;
+      }
+    }
+
+    // Preserve normal URL validation for externally supplied media URLs
+    const isInternalMediaUrl =
+      !cleanMediaUrl ||
+      cleanMediaUrl.startsWith('/api/') ||
+      cleanMediaUrl.startsWith('blob:') ||
+      cleanMediaUrl.startsWith('data:') ||
+      cleanMediaUrl.startsWith('idb://');
+
+    if (!isInternalMediaUrl) {
+      let validExternal = false;
+      try {
+        const testUrl = /^https?:\/\//i.test(cleanMediaUrl)
+          ? cleanMediaUrl
+          : `https://${cleanMediaUrl}`;
+        const parsed = new URL(testUrl);
+        if (
+          (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+          parsed.hostname &&
+          parsed.hostname.includes('.')
+        ) {
+          validExternal = true;
+          cleanMediaUrl = testUrl;
+        }
+      } catch {
+        validExternal = false;
+      }
+
+      if (!validExternal) {
+        setUploadWarning(
+          language === 'el'
+            ? 'Παρακαλούμε εισαγάγετε ένα έγκυρο URL διαδικτύου (π.χ. https://...)'
+            : 'Please enter a valid URL (e.g. https://...)'
+        );
+        return;
+      }
+    }
 
     let finalQuestion: Question;
 
@@ -244,14 +479,15 @@ export const EditQuestionModal: React.FC<EditQuestionModalProps> = ({
         correctAnswer: tfCorrect,
       };
     } else if (type === 'qr_scan') {
+      const qrOld = questionToEdit as QRScanQuestion | undefined;
       finalQuestion = {
         ...baseProps,
         type: 'qr_scan',
-        stationName,
-        stationLocation: 'Κύπρος',
-        qrPayload,
-        fieldClue: 'Αναζητήστε τον κωδικό στον εκπαιδευτικό στύλο.',
-        stationType: 'nesting_cliff',
+        stationName: stationName.trim(),
+        stationLocation: qrOld?.stationLocation || 'Κύπρος',
+        qrPayload: qrPayload.trim().toUpperCase(),
+        fieldClue: qrOld?.fieldClue || 'Αναζητήστε τον κωδικό στον εκπαιδευτικό στύλο.',
+        stationType: qrOld?.stationType || 'nesting_cliff',
       };
     } else {
       finalQuestion = {
@@ -309,7 +545,7 @@ export const EditQuestionModal: React.FC<EditQuestionModalProps> = ({
         </div>
 
         {/* Form Body */}
-        <form onSubmit={handleSubmit} className="p-6 sm:p-8 space-y-5 flex-1">
+        <form onSubmit={handleSubmit} noValidate className="p-6 sm:p-8 space-y-5 flex-1">
           {/* 1. MISSION TITLE (ΤΙΤΛΟΣ ΑΠΟΣΤΟΛΗΣ - REQUESTED) */}
           <div className="p-4 bg-amber-50/80 border border-amber-200/90 rounded-2xl shadow-2xs">
             <label className="block text-xs font-bold uppercase tracking-wider text-amber-950 mb-1 flex items-center gap-1.5">
@@ -405,11 +641,7 @@ export const EditQuestionModal: React.FC<EditQuestionModalProps> = ({
 
                 <button
                   type="button"
-                  onClick={() => {
-                    setMediaType('none');
-                    setMediaUrl('');
-                    setUploadedFileName('');
-                  }}
+                  onClick={handleRemoveMedia}
                   className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
                     mediaType === 'none'
                       ? 'bg-stone-800 text-amber-400 border border-stone-700 shadow-sm'
@@ -420,6 +652,51 @@ export const EditQuestionModal: React.FC<EditQuestionModalProps> = ({
                 </button>
               </div>
             </div>
+
+            {/* QR Station Assigned Media Status Bar */}
+            {type === 'qr_scan' && (
+              <div className="p-3 bg-amber-950/40 border border-amber-500/50 rounded-xl flex items-center justify-between text-xs text-amber-200">
+                <div className="flex items-center gap-2">
+                  <QrCode className="w-4 h-4 text-amber-400 shrink-0" />
+                  <span>
+                    {language === 'el'
+                      ? `Εκπαιδευτικό Υλικό Σταθμού QR (${qrPayload}): `
+                      : `Station QR Educational Material (${qrPayload}): `}
+                    <strong>
+                      {mediaType === 'image' && mediaUrl ? (language === 'el' ? '📷 Εικόνα' : '📷 Image') :
+                       mediaType === 'video' && mediaUrl ? (language === 'el' ? '🎥 Βίντεο' : '🎥 Video') :
+                       (language === 'el' ? '⚠️ Κανένα υλικό' : '⚠️ None')}
+                    </strong>
+                  </span>
+                </div>
+                {mediaUrl && isServerStored && (
+                  <span className="text-[10px] font-mono text-emerald-400 bg-emerald-950/80 px-2 py-0.5 rounded border border-emerald-700 flex items-center gap-1">
+                    ✓ {language === 'el' ? 'Αποθηκευμένο στον Διακομιστή' : 'Saved on Server'}
+                  </span>
+                )}
+                {mediaUrl && !isServerStored && (
+                  <span className="text-[10px] font-mono text-amber-400 bg-amber-950/80 px-2 py-0.5 rounded border border-amber-700 flex items-center gap-1">
+                    ⚠️ {language === 'el' ? 'Μόνο Τοπική Προεπισκόπηση' : 'Local Preview Only'}
+                  </span>
+                )}
+              </div>
+            )}
+
+            {/* Server Sync Warning Banner if upload failed */}
+            {uploadWarning && (
+              <div className="p-3 bg-amber-950/80 border border-amber-400 rounded-xl text-amber-200 text-xs flex items-start gap-2.5 shadow-md">
+                <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                <span className="leading-relaxed">{uploadWarning}</span>
+              </div>
+            )}
+
+            {/* Upload Progress Indicator */}
+            {isUploading && (
+              <div className="p-2.5 bg-blue-950/60 border border-blue-600/60 rounded-xl text-blue-200 text-xs flex items-center gap-2">
+                <div className="w-3.5 h-3.5 border-2 border-blue-400 border-t-transparent rounded-full animate-spin shrink-0" />
+                <span>Αποστολή και επαλήθευση εκπαιδευτικού υλικού στον κεντρικό διακομιστή...</span>
+              </div>
+            )}
 
             {/* Inner Row: Direct Upload from Device Button (Requested by user) */}
             <div className="bg-[#050811] border border-stone-800 rounded-xl p-3 sm:p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -434,7 +711,10 @@ export const EditQuestionModal: React.FC<EditQuestionModalProps> = ({
               <input
                 ref={fileInputRef}
                 type="file"
-                accept="image/*,video/*"
+                accept="image/*,video/*,.mp4,.webm,.mov,.m4v"
+                onClick={(e) => {
+                  (e.target as HTMLInputElement).value = '';
+                }}
                 onChange={handleFileUpload}
                 className="hidden"
               />
@@ -459,11 +739,7 @@ export const EditQuestionModal: React.FC<EditQuestionModalProps> = ({
                   </span>
                   <button
                     type="button"
-                    onClick={() => {
-                      setMediaUrl('');
-                      setUploadedFileName('');
-                      setMediaType('none');
-                    }}
+                    onClick={handleRemoveMedia}
                     className="text-rose-400 hover:text-rose-300 text-xs font-bold ml-2 underline cursor-pointer"
                   >
                     Αφαίρεση
@@ -478,23 +754,34 @@ export const EditQuestionModal: React.FC<EditQuestionModalProps> = ({
                 </span>
               </div>
               <input
-                type="url"
-                value={mediaUrl.startsWith('data:') ? '' : mediaUrl}
+                type="text"
+                inputMode="url"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                value={mediaUrl.startsWith('data:') || mediaUrl.startsWith('blob:') ? '' : mediaUrl}
                 onChange={(e) => {
                   const val = e.target.value;
                   setMediaUrl(val);
-                  setUploadedFileName('');
                   if (val.trim()) {
-                    if (val.includes('youtube.com') || val.includes('youtu.be') || val.endsWith('.mp4')) {
+                    if (val.includes('youtube.com') || val.includes('youtu.be') || val.endsWith('.mp4') || val.includes('/api/station-media/')) {
                       setMediaType('video');
                     } else if (mediaType === 'none') {
                       setMediaType('image');
                     }
+                    if (!val.startsWith('/api/station-media/')) {
+                      setIsServerStored(false);
+                      setUploadedFileName('');
+                    }
+                  } else {
+                    setMediaType('none');
+                    setIsServerStored(false);
+                    setUploadedFileName('');
                   }
                 }}
                 placeholder={
                   mediaType === 'video'
-                    ? 'https://www.youtube.com/watch?v=... ή https://...video.mp4'
+                    ? 'https://www.youtube.com/watch?v=... ή /api/station-media/...'
                     : 'https://images.unsplash.com/... ή URL εικόνας διαδικτύου'
                 }
                 className="w-full text-xs bg-[#060a12] border border-stone-700 rounded-xl p-2.5 text-stone-200 focus:outline-none focus:ring-2 focus:ring-amber-500 font-mono placeholder:text-stone-500"
@@ -515,12 +802,8 @@ export const EditQuestionModal: React.FC<EditQuestionModalProps> = ({
                     </span>
                     <button
                       type="button"
-                      onClick={() => {
-                        setMediaUrl('');
-                        setUploadedFileName('');
-                        setMediaType('none');
-                      }}
-                      className="text-[11px] text-rose-400 hover:text-rose-300 font-bold flex items-center gap-1 transition-colors"
+                      onClick={handleRemoveMedia}
+                      className="text-[11px] text-rose-400 hover:text-rose-300 font-bold flex items-center gap-1 transition-colors cursor-pointer"
                     >
                       <Trash2 className="w-3 h-3" /> {t.mediaRemove}
                     </button>
@@ -545,9 +828,11 @@ export const EditQuestionModal: React.FC<EditQuestionModalProps> = ({
                     </div>
                   ) : (
                     <video
+                      key={mediaUrl}
                       src={mediaUrl}
                       controls
-                      className="max-h-52 w-full rounded-lg"
+                      preload="metadata"
+                      className="max-h-52 w-full rounded-lg bg-black"
                     />
                   )}
                 </div>
@@ -722,7 +1007,7 @@ export const EditQuestionModal: React.FC<EditQuestionModalProps> = ({
           )}
 
           {type === 'qr_scan' && (
-            <div className="p-4 bg-stone-50 rounded-2xl border border-stone-200 space-y-3">
+            <div className="p-4 bg-stone-50 rounded-2xl border border-stone-200 space-y-4">
               <div>
                 <label className="block text-[11px] font-bold text-stone-700 uppercase mb-1">
                   {language === 'el' ? 'Όνομα Σταθμού:' : 'Station Name:'}
@@ -745,6 +1030,72 @@ export const EditQuestionModal: React.FC<EditQuestionModalProps> = ({
                   className="w-full text-xs font-mono bg-white border border-stone-300 rounded-lg p-2 uppercase"
                 />
               </div>
+
+              {/* Automatically Generated Printable QR Code Preview & Download */}
+              {qrPayload.trim().length > 0 ? (
+                <div className="p-4 bg-white rounded-xl border border-stone-200 shadow-2xs space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-stone-900 flex items-center gap-1.5">
+                      <QrCode className="w-4 h-4 text-rose-600" />
+                      {language === 'el' ? 'Εκτυπώσιμος Κωδικός QR Σταθμού' : 'Printable Station QR Code'}
+                    </span>
+                    <span className="text-[10px] text-stone-400 font-mono">
+                      {qrPayload.trim().length} {language === 'el' ? 'χαρακτήρες' : 'chars'}
+                    </span>
+                  </div>
+
+                  <div className="flex flex-col sm:flex-row items-center gap-4 bg-stone-50 p-3.5 rounded-xl border border-stone-200">
+                    <div className="bg-white p-2.5 rounded-xl border border-stone-200 shadow-xs flex items-center justify-center shrink-0">
+                      <QRCodeCanvas
+                        id="station-printable-qr-canvas"
+                        value={qrPayload.trim()}
+                        size={512}
+                        level="H"
+                        marginSize={2}
+                        style={{ width: '130px', height: '130px' }}
+                        className="rounded-lg"
+                      />
+                    </div>
+
+                    <div className="space-y-2 text-center sm:text-left flex-1 min-w-0">
+                      <div className="text-xs text-stone-700">
+                        <span className="font-semibold block text-stone-900 text-[11px] uppercase tracking-wider">
+                          {language === 'el' ? 'Περιεχόμενο QR (Token):' : 'QR Code Content (Token):'}
+                        </span>
+                        <code className="text-xs font-mono font-bold text-rose-700 bg-rose-50 px-2.5 py-1 rounded-md border border-rose-200 break-all inline-block mt-1">
+                          {qrPayload.trim()}
+                        </code>
+                      </div>
+
+                      <p className="text-[11px] text-stone-500 leading-relaxed">
+                        {language === 'el'
+                          ? 'Αυτός ο κωδικός QR κωδικοποιεί επακριβώς το αναγνωριστικό του σταθμού για εκτύπωση και τοποθέτηση στην πινακίδα πεδίου.'
+                          : 'This QR code encodes the exact station token for printing and placing on physical field signage.'}
+                      </p>
+
+                      <div className="pt-1 flex flex-wrap gap-2 justify-center sm:justify-start">
+                        <button
+                          type="button"
+                          onClick={handleDownloadQrCode}
+                          className="px-4 py-2 bg-rose-600 hover:bg-rose-700 active:bg-rose-800 text-white font-bold text-xs rounded-xl shadow-xs transition-all flex items-center gap-2 cursor-pointer"
+                        >
+                          <Download className="w-4 h-4" />
+                          <span>{language === 'el' ? 'Λήψη QR Code' : 'Download QR Code'}</span>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-800 flex items-center gap-2">
+                  <QrCode className="w-4 h-4 text-amber-600 shrink-0" />
+                  <span>
+                    {language === 'el'
+                      ? 'Συμπληρώστε ένα έγκυρο QR Token για αυτόματη δημιουργία εκτυπώσιμου κωδικού QR.'
+                      : 'Enter a valid QR Token to automatically generate a printable QR code.'}
+                  </span>
+                </div>
+              )}
             </div>
           )}
 
