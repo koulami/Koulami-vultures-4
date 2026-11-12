@@ -94,6 +94,9 @@ function sendJson(res: ServerResponse, statusCode: number, data: any) {
 }
 
 function parseJsonBody(req: IncomingMessage): Promise<any> {
+  if ((req as any).body && typeof (req as any).body === 'object') {
+    return Promise.resolve((req as any).body);
+  }
   return new Promise((resolve) => {
     let body = '';
     req.on('data', (chunk) => {
@@ -169,6 +172,48 @@ function saveServerPostersToDisk() {
     fs.renameSync(tmpSubs, serverSubmissionsFilePath);
   } catch (err) {
     console.error('Failed to save photo submissions to disk:', err);
+  }
+}
+
+// Dedicated storage directory for synchronized question bank
+const questionsUploadsDir = path.resolve(process.cwd(), 'uploads', 'questions');
+if (!fs.existsSync(questionsUploadsDir)) {
+  fs.mkdirSync(questionsUploadsDir, { recursive: true });
+}
+const serverQuestionsFilePath = path.join(questionsUploadsDir, 'questions.json');
+
+export interface ServerQuestionsData {
+  questions: any[];
+  updatedAt: number;
+  version: number;
+  updatedBy?: string;
+}
+
+let serverQuestionsState: ServerQuestionsData | null = null;
+
+function loadServerQuestionsFromDisk() {
+  try {
+    if (fs.existsSync(serverQuestionsFilePath)) {
+      const raw = fs.readFileSync(serverQuestionsFilePath, 'utf-8');
+      const parsed = JSON.parse(raw);
+      if (parsed && Array.isArray(parsed.questions) && parsed.questions.length > 0) {
+        serverQuestionsState = parsed;
+      }
+    }
+  } catch (err) {
+    console.warn('Failed to load questions from disk:', err);
+  }
+}
+loadServerQuestionsFromDisk();
+
+function saveServerQuestionsToDisk() {
+  if (!serverQuestionsState) return;
+  try {
+    const tmpQuestions = `${serverQuestionsFilePath}.tmp_${Date.now()}`;
+    fs.writeFileSync(tmpQuestions, JSON.stringify(serverQuestionsState, null, 2), 'utf-8');
+    fs.renameSync(tmpQuestions, serverQuestionsFilePath);
+  } catch (err) {
+    console.error('Failed to save questions to disk:', err);
   }
 }
 
@@ -529,6 +574,99 @@ export async function handleGameApiRequest(req: IncomingMessage, res: ServerResp
       state: gameState,
       posters: {},
       submissions: [],
+    });
+    return true;
+  }
+
+  // 8e. GET /api/game/questions - Retrieve the authoritative question bank
+  if (req.method === 'GET' && cleanPath === '/api/game/questions') {
+    if (
+      serverQuestionsState &&
+      Array.isArray(serverQuestionsState.questions) &&
+      serverQuestionsState.questions.length > 0
+    ) {
+      sendJson(res, 200, {
+        success: true,
+        exists: true,
+        questions: serverQuestionsState.questions,
+        version: serverQuestionsState.version,
+        updatedAt: serverQuestionsState.updatedAt,
+        serverTimeMs: Date.now(),
+      });
+    } else {
+      sendJson(res, 200, {
+        success: true,
+        exists: false,
+        questions: null,
+        serverTimeMs: Date.now(),
+      });
+    }
+    return true;
+  }
+
+  // 8f. POST /api/game/questions - Administrator synchronizes updated question bank
+  if (req.method === 'POST' && cleanPath === '/api/game/questions') {
+    const body = await parseJsonBody(req);
+    const isAdmin =
+      req.headers['x-admin-auth'] === 'true' ||
+      body?.updatedBy === 'admin';
+
+    // Strict student protection: non-administrators may never push question bank updates
+    if (!isAdmin) {
+      sendJson(res, 403, {
+        success: false,
+        message: 'Unauthorized: Only an authenticated administrator may update the question bank',
+      });
+      return true;
+    }
+
+    const incomingQuestions = body?.questions;
+    if (!Array.isArray(incomingQuestions) || incomingQuestions.length === 0) {
+      sendJson(res, 400, {
+        success: false,
+        message: 'Invalid payload: questions array is required and must not be empty',
+      });
+      return true;
+    }
+
+    // Protection against stale updates
+    const incomingVersion = typeof body.version === 'number' ? body.version : undefined;
+    const currentVersion = serverQuestionsState?.version || 0;
+    if (serverQuestionsState && incomingVersion !== undefined && incomingVersion < currentVersion) {
+      sendJson(res, 409, {
+        success: false,
+        message: `Stale update rejected: server version is ${currentVersion}, provided version is ${incomingVersion}`,
+        currentVersion,
+      });
+      return true;
+    }
+
+    const nextVersion = Math.max(currentVersion + 1, incomingVersion || 0);
+    const nowMs = Date.now();
+
+    serverQuestionsState = {
+      questions: incomingQuestions,
+      version: nextVersion,
+      updatedAt: nowMs,
+      updatedBy: 'admin',
+    };
+
+    // Save atomically to disk
+    saveServerQuestionsToDisk();
+
+    // Broadcast SSE notification event to all connected devices (students & other teachers)
+    broadcastGameEvent('questions_updated', {
+      version: nextVersion,
+      updatedAt: nowMs,
+      count: incomingQuestions.length,
+      serverTimeMs: nowMs,
+    });
+
+    sendJson(res, 200, {
+      success: true,
+      message: `Successfully synchronized ${incomingQuestions.length} questions to server (v${nextVersion})`,
+      version: nextVersion,
+      updatedAt: nowMs,
     });
     return true;
   }

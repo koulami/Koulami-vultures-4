@@ -74,6 +74,10 @@ import {
   syncAllLocalPostersToServer,
   clearServerGameData,
 } from './utils/posterSyncManager';
+import {
+  fetchServerQuestions,
+  syncQuestionsToServer,
+} from './utils/questionSyncManager';
 import { ClearGameDataModal } from './components/ClearGameDataModal';
 import { Language, translations } from './i18n/translations';
 import { getLocalizedQuestion } from './i18n/questionTranslations';
@@ -259,6 +263,20 @@ export default function App() {
   const [isAdminReportOpen, setIsAdminReportOpen] = useState<boolean>(false);
   const [isQRScannerOpen, setIsQRScannerOpen] = useState<boolean>(false);
   const [isClearGameDataOpen, setIsClearGameDataOpen] = useState<boolean>(false);
+  const [exportToast, setExportToast] = useState<{
+    type: 'success' | 'error' | 'warning';
+    title: string;
+    message: string;
+  } | null>(null);
+
+  useEffect(() => {
+    if (exportToast) {
+      const timer = setTimeout(() => {
+        setExportToast(null);
+      }, 7000);
+      return () => clearTimeout(timer);
+    }
+  }, [exportToast]);
 
   // Edit Question & Team Modals
   const [isEditQuestionOpen, setIsEditQuestionOpen] = useState<boolean>(false);
@@ -336,6 +354,33 @@ export default function App() {
       isMounted = false;
     };
   }, []);
+
+  const [serverQuestionVersion, setServerQuestionVersion] = useState<number>(1);
+
+  // Cross-device question bank sync: fetch authoritative questions on mount & bootstrap if admin
+  useEffect(() => {
+    let isMounted = true;
+    fetchServerQuestions().then(async (serverData) => {
+      if (!isMounted || !serverData) return;
+      if (serverData.exists && Array.isArray(serverData.questions) && serverData.questions.length > 0) {
+        setQuestions(serverData.questions);
+        setServerQuestionVersion(serverData.version || 1);
+        try {
+          localStorage.setItem('vulture_questions_custom_v2', JSON.stringify(serverData.questions));
+        } catch {}
+      } else if (!serverData.exists && isAdminLoggedIn) {
+        // Bootstrap server bank from administrator's local bank (including all custom edits)
+        const syncRes = await syncQuestionsToServer(questions, true, 1);
+        if (syncRes.success && isMounted) {
+          setServerQuestionVersion(syncRes.version || 1);
+        }
+      }
+    });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [isAdminLoggedIn]);
 
   // Student Session & Team Lock State
   const [isStudentConnected, setIsStudentConnected] = useState<boolean>(() => {
@@ -752,6 +797,22 @@ export default function App() {
           }
         } catch (err) {
           console.warn('[SSE] Error handling poster_updated event:', err);
+        }
+      });
+      sse.addEventListener('questions_updated', (e: MessageEvent) => {
+        try {
+          const parsed = JSON.parse(e.data);
+          fetchServerQuestions().then((serverData) => {
+            if (serverData?.exists && Array.isArray(serverData.questions) && serverData.questions.length > 0) {
+              setQuestions(serverData.questions);
+              setServerQuestionVersion(serverData.version || parsed?.version || 1);
+              try {
+                localStorage.setItem('vulture_questions_custom_v2', JSON.stringify(serverData.questions));
+              } catch {}
+            }
+          });
+        } catch (err) {
+          console.warn('[SSE] Error handling questions_updated event:', err);
         }
       });
       sse.addEventListener('game_cleared', () => {
@@ -2145,21 +2206,77 @@ function isYouTubeUrl(url: string): boolean {
     setIsEditQuestionOpen(true);
   };
 
-  const handleDeleteQuestion = (id: string) => {
+  const handleDeleteQuestion = async (id: string) => {
     if (window.confirm('Είστε βέβαιοι ότι θέλετε να διαγράψετε αυτή την ερώτηση;')) {
-      setQuestions((prev) => prev.filter((q) => q.id !== id));
+      const nextQuestions = questions.filter((q) => q.id !== id);
+      setQuestions(nextQuestions);
+      try {
+        localStorage.setItem('vulture_questions_custom_v2', JSON.stringify(nextQuestions));
+      } catch {}
+
+      if (isAdminLoggedIn) {
+        const syncRes = await syncQuestionsToServer(nextQuestions, true);
+        if (syncRes.success) {
+          setServerQuestionVersion(syncRes.version || serverQuestionVersion + 1);
+          setExportToast({
+            type: 'success',
+            title: language === 'el' ? 'Επιτυχής Διαγραφή' : 'Deleted Successfully',
+            message:
+              language === 'el'
+                ? 'Η ερώτηση διαγράφηκε και η τράπεζα συγχρονίστηκε σε όλες τις συσκευές.'
+                : 'Question deleted and bank synchronized across all devices.',
+          });
+        } else {
+          setExportToast({
+            type: 'error',
+            title: language === 'el' ? 'Τοπική Διαγραφή' : 'Deleted Locally',
+            message:
+              language === 'el'
+                ? `Η ερώτηση διαγράφηκε τοπικά, αλλά απέτυχε ο συγχρονισμός στον διακομιστή: ${syncRes.message || 'Σφάλμα σύνδεσης'}`
+                : `Deleted locally, but failed to sync to server: ${syncRes.message || 'Connection error'}`,
+          });
+        }
+      }
     }
   };
 
-  const handleSaveQuestion = (savedQuestion: Question) => {
-    setQuestions((prev) => {
-      const exists = prev.some((q) => q.id === savedQuestion.id);
-      if (exists) {
-        return prev.map((q) => (q.id === savedQuestion.id ? savedQuestion : q));
+  const handleSaveQuestion = async (savedQuestion: Question) => {
+    const exists = questions.some((q) => q.id === savedQuestion.id);
+    let nextQuestions: Question[];
+    if (exists) {
+      nextQuestions = questions.map((q) => (q.id === savedQuestion.id ? savedQuestion : q));
+    } else {
+      nextQuestions = [savedQuestion, ...questions];
+    }
+
+    setQuestions(nextQuestions);
+    try {
+      localStorage.setItem('vulture_questions_custom_v2', JSON.stringify(nextQuestions));
+    } catch {}
+
+    if (isAdminLoggedIn) {
+      const syncRes = await syncQuestionsToServer(nextQuestions, true);
+      if (syncRes.success) {
+        setServerQuestionVersion(syncRes.version || serverQuestionVersion + 1);
+        setExportToast({
+          type: 'success',
+          title: language === 'el' ? 'Επιτυχής Αποθήκευση' : 'Saved Successfully',
+          message:
+            language === 'el'
+              ? 'Η ερώτηση και το φωτογραφικό υλικό αποθηκεύτηκαν και συγχρονίστηκαν σε όλες τις συσκευές.'
+              : 'Question and reference media saved and synchronized across all devices.',
+        });
       } else {
-        return [savedQuestion, ...prev];
+        setExportToast({
+          type: 'error',
+          title: language === 'el' ? 'Τοπική Αποθήκευση' : 'Saved Locally',
+          message:
+            language === 'el'
+              ? `Η ερώτηση αποθηκεύτηκε τοπικά, αλλά απέτυχε ο συγχρονισμός στον διακομιστή: ${syncRes.message || 'Σφάλμα σύνδεσης'}`
+              : `Saved locally, but failed to sync to server: ${syncRes.message || 'Connection error'}`,
+        });
       }
-    });
+    }
   };
 
   // Admin Actions for Teams
@@ -2311,20 +2428,6 @@ function isYouTubeUrl(url: string): boolean {
 
   // Export & Printable Register Modal State & Handlers
   const [isPrintRegisterOpen, setIsPrintRegisterOpen] = useState<boolean>(false);
-  const [exportToast, setExportToast] = useState<{
-    type: 'success' | 'error';
-    title: string;
-    message: string;
-  } | null>(null);
-
-  useEffect(() => {
-    if (exportToast) {
-      const timer = setTimeout(() => {
-        setExportToast(null);
-      }, 7000);
-      return () => clearTimeout(timer);
-    }
-  }, [exportToast]);
 
   const handleExportFullBackup = () => {
     const result = exportFullJSONBackup(questions, teams, posters, teamPhotoSubmissions, language, savedReflections);
@@ -5451,6 +5554,8 @@ function isYouTubeUrl(url: string): boolean {
           <div className="mt-0.5 shrink-0">
             {exportToast.type === 'success' ? (
               <CheckCircle2 className="w-5 h-5 text-emerald-400" />
+            ) : exportToast.type === 'warning' ? (
+              <AlertTriangle className="w-5 h-5 text-amber-400" />
             ) : (
               <AlertTriangle className="w-5 h-5 text-rose-400" />
             )}

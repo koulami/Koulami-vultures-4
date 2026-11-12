@@ -8,13 +8,28 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 
+import { handleGameApiRequest } from './src/server/gameApiHandler.ts';
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+app.use(async (req, res, next) => {
+  try {
+    const handled = await handleGameApiRequest(req, res);
+    if (!handled) {
+      next();
+    }
+  } catch (err) {
+    console.error('Error in gameApiHandler middleware:', err);
+    next();
+  }
+});
 
 // Authoritative synchronized game state
 export interface TeamProgressReport {
