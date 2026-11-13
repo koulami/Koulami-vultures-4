@@ -100,6 +100,9 @@ export function formatAllAnswersText(q: Question, language: 'el' | 'en' = 'el'):
  * Format the correct answer into human-readable text for CSV/Register
  */
 export function formatCorrectAnswerText(q: Question, language: 'el' | 'en' = 'el'): string {
+  if (q.isPendingAnswer) {
+    return language === 'en' ? '[Pending Answer]' : '[Εκκρεμεί Απάντηση]';
+  }
   switch (q.type) {
     case 'multiple_choice': {
       const mc = q as MultipleChoiceQuestion;

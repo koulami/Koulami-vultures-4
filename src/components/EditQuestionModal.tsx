@@ -103,6 +103,7 @@ export const EditQuestionModal: React.FC<EditQuestionModalProps> = ({
   ]);
   const [correctAnswerSingle, setCorrectAnswerSingle] = useState<string>('opt-a');
   const [correctAnswersMulti, setCorrectAnswersMulti] = useState<string[]>(['opt-a']);
+  const [isPendingAnswer, setIsPendingAnswer] = useState<boolean>(false);
   const [tfCorrect, setTfCorrect] = useState<boolean>(true);
   const [qrPayload, setQrPayload] = useState<string>('VA-STATION-NEW-2026');
   const [stationName, setStationName] = useState<string>('Σταθμός Πεδίου');
@@ -118,6 +119,8 @@ export const EditQuestionModal: React.FC<EditQuestionModalProps> = ({
       setIsActive(questionToEdit.isActive);
       setAssignedTeamIds(questionToEdit.assignedTeamIds);
       setLocationFocus((questionToEdit.locationFocus as any) || 'Both');
+      const pendingFlag = Boolean(questionToEdit.isPendingAnswer);
+      setIsPendingAnswer(pendingFlag);
 
       // Populate media attachments if present
       if (questionToEdit.mediaUrl && questionToEdit.mediaType && questionToEdit.mediaType !== 'none') {
@@ -138,7 +141,7 @@ export const EditQuestionModal: React.FC<EditQuestionModalProps> = ({
           { id: 'opt-c', text: '' },
           { id: 'opt-d', text: '' },
         ]);
-        setCorrectAnswerSingle(mc.correctAnswer || 'opt-a');
+        setCorrectAnswerSingle(mc.correctAnswer || (pendingFlag ? '' : 'opt-a'));
       } else if (questionToEdit.type === 'multiple_choice_multi') {
         const mcm = questionToEdit as MultipleChoiceMultiQuestion;
         setMcOptions(mcm.options && mcm.options.length > 0 ? mcm.options : [
@@ -147,9 +150,14 @@ export const EditQuestionModal: React.FC<EditQuestionModalProps> = ({
           { id: 'opt-c', text: '' },
           { id: 'opt-d', text: '' },
         ]);
-        setCorrectAnswersMulti(mcm.correctAnswers || ['opt-a']);
+        setCorrectAnswersMulti(
+          Array.isArray(mcm.correctAnswers) && mcm.correctAnswers.length > 0
+            ? mcm.correctAnswers
+            : (pendingFlag ? [] : ['opt-a'])
+        );
       } else if (questionToEdit.type === 'true_false') {
-        setTfCorrect((questionToEdit as TrueFalseQuestion).correctAnswer);
+        const tf = questionToEdit as TrueFalseQuestion;
+        setTfCorrect(tf.correctAnswer !== undefined ? tf.correctAnswer : true);
       } else if (questionToEdit.type === 'qr_scan') {
         const qr = questionToEdit as QRScanQuestion;
         const normToken = (qr.qrPayload || '').trim().toUpperCase();
@@ -443,6 +451,24 @@ export const EditQuestionModal: React.FC<EditQuestionModalProps> = ({
 
     let finalQuestion: Question;
 
+    const hasSingleAnswer = Boolean(correctAnswerSingle && correctAnswerSingle.trim().length > 0);
+    const hasMultiAnswer = Boolean(correctAnswersMulti && correctAnswersMulti.length > 0);
+
+    const isSurvey =
+      baseId === 'gypes-new-q-48' ||
+      baseId === 'gypes-q-74' ||
+      title.toLowerCase().includes('δημοσκόπηση') ||
+      (missionTitle || '').toLowerCase().includes('δημοσκόπηση') ||
+      title.toLowerCase().includes('θεωρειτε εσεις πιο σημαντική');
+
+    const calculatedIsPending = isSurvey
+      ? false
+      : type === 'multiple_choice'
+      ? !hasSingleAnswer
+      : type === 'multiple_choice_multi'
+      ? !hasMultiAnswer
+      : Boolean(isPendingAnswer);
+
     const baseProps = {
       id: baseId,
       missionTitle: missionTitle.trim() || undefined,
@@ -451,7 +477,8 @@ export const EditQuestionModal: React.FC<EditQuestionModalProps> = ({
       assignedTeamIds,
       points: Number(points),
       explanation: explanation.trim(),
-      isActive,
+      isActive: calculatedIsPending ? false : isActive,
+      isPendingAnswer: calculatedIsPending ? true : undefined,
       locationFocus,
       mediaType: cleanMediaType,
       mediaUrl: cleanMediaUrl || undefined,
@@ -463,14 +490,14 @@ export const EditQuestionModal: React.FC<EditQuestionModalProps> = ({
         ...baseProps,
         type: 'multiple_choice',
         options: mcOptions.filter((o) => o.text.trim().length > 0),
-        correctAnswer: correctAnswerSingle,
+        correctAnswer: hasSingleAnswer ? correctAnswerSingle : undefined,
       };
     } else if (type === 'multiple_choice_multi') {
       finalQuestion = {
         ...baseProps,
         type: 'multiple_choice_multi',
         options: mcOptions.filter((o) => o.text.trim().length > 0),
-        correctAnswers: correctAnswersMulti,
+        correctAnswers: hasMultiAnswer ? correctAnswersMulti : undefined,
       };
     } else if (type === 'true_false') {
       finalQuestion = {
@@ -910,17 +937,27 @@ export const EditQuestionModal: React.FC<EditQuestionModalProps> = ({
           {/* 6. TYPE-SPECIFIC CONFIGURATION */}
           {type === 'multiple_choice' && (
             <div className="space-y-3 p-4 bg-stone-50 rounded-2xl border border-stone-200">
-              <label className="block text-xs font-bold uppercase tracking-wider text-stone-700">
-                {language === 'el' ? 'Επιλογές Απάντησης (Επιλέξτε τη σωστή):' : 'Answer Options (Select correct):'}
-              </label>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <label className="block text-xs font-bold uppercase tracking-wider text-stone-700">
+                  {language === 'el' ? 'Επιλογές Απάντησης (Επιλέξτε τη σωστή):' : 'Answer Options (Select correct):'}
+                </label>
+                {isPendingAnswer && (
+                  <span className="text-[11px] font-bold text-amber-800 bg-amber-100 border border-amber-300 px-2.5 py-0.5 rounded-full flex items-center gap-1 shadow-2xs">
+                    <span>⏳ Εκκρεμεί ορισμός σωστής απάντησης</span>
+                  </span>
+                )}
+              </div>
               {mcOptions.map((opt, idx) => (
                 <div key={opt.id} className="flex items-center gap-2">
                   <input
                     type="radio"
                     name="correct-mc"
-                    checked={correctAnswerSingle === opt.id}
-                    onChange={() => setCorrectAnswerSingle(opt.id)}
-                    className="w-4 h-4 text-amber-600 focus:ring-amber-500"
+                    checked={Boolean(correctAnswerSingle && correctAnswerSingle === opt.id)}
+                    onChange={() => {
+                      setCorrectAnswerSingle(opt.id);
+                      setIsPendingAnswer(false);
+                    }}
+                    className="w-4 h-4 text-amber-600 focus:ring-amber-500 cursor-pointer"
                   />
                   <input
                     type="text"
@@ -941,9 +978,16 @@ export const EditQuestionModal: React.FC<EditQuestionModalProps> = ({
 
           {type === 'multiple_choice_multi' && (
             <div className="space-y-3 p-4 bg-stone-50 rounded-2xl border border-stone-200">
-              <label className="block text-xs font-bold uppercase tracking-wider text-stone-700">
-                {language === 'el' ? 'Επιλογές Απάντησης (Επιλέξτε όλες τις σωστές):' : 'Answer Options (Select all correct):'}
-              </label>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <label className="block text-xs font-bold uppercase tracking-wider text-stone-700">
+                  {language === 'el' ? 'Επιλογές Απάντησης (Επιλέξτε όλες τις σωστές):' : 'Answer Options (Select all correct):'}
+                </label>
+                {isPendingAnswer && (
+                  <span className="text-[11px] font-bold text-amber-800 bg-amber-100 border border-amber-300 px-2.5 py-0.5 rounded-full flex items-center gap-1 shadow-2xs">
+                    <span>⏳ Εκκρεμεί ορισμός σωστών απαντήσεων</span>
+                  </span>
+                )}
+              </div>
               {mcOptions.map((opt, idx) => {
                 const isChecked = correctAnswersMulti.includes(opt.id);
                 return (
@@ -952,11 +996,15 @@ export const EditQuestionModal: React.FC<EditQuestionModalProps> = ({
                       type="checkbox"
                       checked={isChecked}
                       onChange={() => {
-                        setCorrectAnswersMulti((prev) =>
-                          isChecked ? prev.filter((id) => id !== opt.id) : [...prev, opt.id]
-                        );
+                        setCorrectAnswersMulti((prev) => {
+                          const next = isChecked ? prev.filter((id) => id !== opt.id) : [...prev, opt.id];
+                          if (next.length > 0) {
+                            setIsPendingAnswer(false);
+                          }
+                          return next;
+                        });
                       }}
-                      className="w-4 h-4 text-amber-600 focus:ring-amber-500 rounded"
+                      className="w-4 h-4 text-amber-600 focus:ring-amber-500 rounded cursor-pointer"
                     />
                     <input
                       type="text"

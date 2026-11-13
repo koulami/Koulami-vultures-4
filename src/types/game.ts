@@ -61,6 +61,7 @@ export interface BaseQuestion {
   difficulty?: 'easy' | 'medium' | 'hard';
   explanation: string;
   isActive: boolean;
+  isPendingAnswer?: boolean; // When true, correct answer has not yet been entered
   tags?: string[];
   mediaType?: 'image' | 'video' | 'none';
   mediaUrl?: string;     // Επισυναπτόμενο αρχείο ή URL από διαδίκτυο
@@ -71,18 +72,18 @@ export interface BaseQuestion {
 export interface MultipleChoiceQuestion extends BaseQuestion {
   type: 'multiple_choice';
   options: { id: string; text: string; detail?: string }[];
-  correctAnswer: string; // option id
+  correctAnswer?: string; // option id (optional or empty string when isPendingAnswer is true)
 }
 
 export interface MultipleChoiceMultiQuestion extends BaseQuestion {
   type: 'multiple_choice_multi';
   options: { id: string; text: string; detail?: string }[];
-  correctAnswers: string[]; // array of correct option ids
+  correctAnswers?: string[]; // array of correct option ids (optional or empty array when isPendingAnswer is true)
 }
 
 export interface TrueFalseQuestion extends BaseQuestion {
   type: 'true_false';
-  correctAnswer: boolean;
+  correctAnswer?: boolean; // (optional when isPendingAnswer is true)
 }
 
 export interface TextMatchingQuestion extends BaseQuestion {

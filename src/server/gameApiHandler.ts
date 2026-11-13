@@ -6,6 +6,7 @@
 import { IncomingMessage, ServerResponse } from 'http';
 import fs from 'fs';
 import path from 'path';
+import { defaultQuestions, mergeQuestionBanks } from '../data/defaultGame';
 
 export interface TeamProgressReport {
   teamId: string;
@@ -197,12 +198,29 @@ function loadServerQuestionsFromDisk() {
       const raw = fs.readFileSync(serverQuestionsFilePath, 'utf-8');
       const parsed = JSON.parse(raw);
       if (parsed && Array.isArray(parsed.questions) && parsed.questions.length > 0) {
-        serverQuestionsState = parsed;
+        const merged = mergeQuestionBanks(parsed.questions, defaultQuestions);
+        serverQuestionsState = {
+          ...parsed,
+          questions: merged,
+        };
+        if (merged.length > parsed.questions.length) {
+          saveServerQuestionsToDisk();
+        }
+        return;
       }
     }
   } catch (err) {
     console.warn('Failed to load questions from disk:', err);
   }
+
+  // If no questions file yet exists on disk, initialize from combined default questions
+  serverQuestionsState = {
+    questions: defaultQuestions,
+    version: 1,
+    updatedAt: Date.now(),
+    updatedBy: 'system',
+  };
+  saveServerQuestionsToDisk();
 }
 loadServerQuestionsFromDisk();
 

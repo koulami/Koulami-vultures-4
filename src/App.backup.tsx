@@ -336,7 +336,7 @@ function isYouTubeUrl(url: string): boolean {
       case 'multiple_choice':
         return userSingleChoice === (currentQ as MultipleChoiceQuestion).correctAnswer;
       case 'multiple_choice_multi': {
-        const correct = (currentQ as MultipleChoiceMultiQuestion).correctAnswers.sort();
+        const correct = [...((currentQ as MultipleChoiceMultiQuestion).correctAnswers || [])].sort();
         const selected = [...userMultiChoice].sort();
         return JSON.stringify(correct) === JSON.stringify(selected);
       }
@@ -1390,7 +1390,7 @@ function isYouTubeUrl(url: string): boolean {
                       <div className="grid grid-cols-1 gap-3">
                         {(currentQ as MultipleChoiceMultiQuestion).options.map((option) => {
                           const isSelected = userMultiChoice.includes(option.id);
-                          const isCorrect = (currentQ as MultipleChoiceMultiQuestion).correctAnswers.includes(option.id);
+                          const isCorrect = (currentQ as MultipleChoiceMultiQuestion).correctAnswers?.includes(option.id) ?? false;
 
                           let style = 'border-stone-200 bg-stone-50 hover:bg-stone-100';
                           if (isSelected && !isAnswerSubmitted) {

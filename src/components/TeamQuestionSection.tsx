@@ -21,6 +21,7 @@ import {
   ChevronDown,
   ChevronUp,
   Info,
+  Clock,
 } from 'lucide-react';
 
 interface TeamQuestionSectionProps {
@@ -86,6 +87,7 @@ export const TeamQuestionSection: React.FC<TeamQuestionSectionProps> = ({
   // 3. Separate into Active Questions and Inactive Questions
   const activeQuestions = filteredQuestions.filter((q) => q.isActive);
   const inactiveQuestions = filteredQuestions.filter((q) => !q.isActive);
+  const pendingQuestions = filteredQuestions.filter((q) => q.isPendingAnswer);
 
   const teamPoints = activeQuestions.reduce((acc, q) => acc + q.points, 0);
 
@@ -152,6 +154,16 @@ export const TeamQuestionSection: React.FC<TeamQuestionSectionProps> = ({
               {inactiveQuestions.length} {isEn ? 'Inactive' : 'Ανενεργές'}
             </span>
           </span>
+
+          {/* Pending Answer Badge (if any) */}
+          {pendingQuestions.length > 0 && (
+            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl text-xs font-black bg-amber-100 text-amber-950 border border-amber-300 shadow-2xs">
+              <Clock className="w-3.5 h-3.5 text-amber-700" />
+              <span>
+                {pendingQuestions.length} {isEn ? 'Pending Answer' : 'Εκκρεμεί απάντηση'}
+              </span>
+            </span>
+          )}
 
           {/* Team Active Points */}
           <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl text-xs font-mono font-black bg-amber-100 text-amber-950 border border-amber-300">
@@ -261,15 +273,27 @@ export const TeamQuestionSection: React.FC<TeamQuestionSectionProps> = ({
 
                               {/* 2. ACTIVE / INACTIVE TOGGLE */}
                               <td className="py-3 px-3 whitespace-nowrap">
-                                <button
-                                  type="button"
-                                  onClick={() => onToggleActive(q.id)}
-                                  className="px-2.5 py-1 rounded-full text-xs font-black border transition-all cursor-pointer bg-emerald-100 text-emerald-800 border-emerald-300 hover:bg-emerald-200 flex items-center gap-1 shadow-2xs"
-                                  title={isEn ? 'Click to deactivate question' : 'Κάντε κλικ για απενεργοποίηση'}
-                                >
-                                  <Check className="w-3 h-3 stroke-[3]" />
-                                  <span>{t.activeBadge}</span>
-                                </button>
+                                {q.isPendingAnswer ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => onToggleActive(q.id)}
+                                    className="px-2.5 py-1 rounded-full text-xs font-black border transition-all cursor-pointer bg-amber-100 text-amber-900 border-amber-300 hover:bg-amber-200 flex items-center gap-1 shadow-2xs"
+                                    title={isEn ? 'Pending answer. Click to deactivate.' : 'Εκκρεμεί απάντηση. Κάντε κλικ για απενεργοποίηση.'}
+                                  >
+                                    <Clock className="w-3 h-3 text-amber-700" />
+                                    <span>{isEn ? 'Pending Answer' : 'Εκκρεμεί απάντηση'}</span>
+                                  </button>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => onToggleActive(q.id)}
+                                    className="px-2.5 py-1 rounded-full text-xs font-black border transition-all cursor-pointer bg-emerald-100 text-emerald-800 border-emerald-300 hover:bg-emerald-200 flex items-center gap-1 shadow-2xs"
+                                    title={isEn ? 'Click to deactivate question' : 'Κάντε κλικ για απενεργοποίηση'}
+                                  >
+                                    <Check className="w-3 h-3 stroke-[3]" />
+                                    <span>{t.activeBadge}</span>
+                                  </button>
+                                )}
                               </td>
 
                               {/* 3. QUESTION TITLE & DETAILS */}
@@ -476,15 +500,29 @@ export const TeamQuestionSection: React.FC<TeamQuestionSectionProps> = ({
 
                               {/* 2. ACTIVE / INACTIVE TOGGLE (Click to activate) */}
                               <td className="py-2.5 px-3 whitespace-nowrap">
-                                <button
-                                  type="button"
-                                  onClick={() => onToggleActive(q.id)}
-                                  className="px-2.5 py-1 rounded-full text-xs font-bold border transition-all cursor-pointer bg-stone-200 hover:bg-emerald-100 text-stone-700 hover:text-emerald-900 border-stone-300 hover:border-emerald-300 flex items-center gap-1 shadow-2xs"
-                                  title={isEn ? 'Click to reactivate question' : 'Κάντε κλικ για επανενεργοποίηση'}
-                                >
-                                  <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                                  <span>{t.inactiveBadge}</span>
-                                </button>
+                                {q.isPendingAnswer ? (
+                                  <span
+                                    className="px-2.5 py-1 rounded-full text-xs font-black border transition-all bg-amber-100 text-amber-900 border-amber-300 flex items-center gap-1 shadow-2xs cursor-not-allowed"
+                                    title={
+                                      isEn
+                                        ? 'Cannot activate: Correct answer has not been entered yet. Click the edit icon to set the answer.'
+                                        : 'Δεν μπορεί να ενεργοποιηθεί: Εκκρεμεί ορισμός σωστής απάντησης. Κάντε κλικ στην επεξεργασία για να ορίσετε την απάντηση.'
+                                    }
+                                  >
+                                    <Clock className="w-3 h-3 text-amber-700" />
+                                    <span>{isEn ? 'Pending Answer' : 'Εκκρεμεί απάντηση'}</span>
+                                  </span>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => onToggleActive(q.id)}
+                                    className="px-2.5 py-1 rounded-full text-xs font-bold border transition-all cursor-pointer bg-stone-200 hover:bg-emerald-100 text-stone-700 hover:text-emerald-900 border-stone-300 hover:border-emerald-300 flex items-center gap-1 shadow-2xs"
+                                    title={isEn ? 'Click to reactivate question' : 'Κάντε κλικ για επανενεργοποίηση'}
+                                  >
+                                    <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                                    <span>{t.inactiveBadge}</span>
+                                  </button>
+                                )}
                               </td>
 
                               {/* 3. QUESTION TITLE & DETAILS (ALL ORIGINAL DATA PRESERVED) */}

@@ -9,6 +9,7 @@ import {
   Team,
 } from '../types/game';
 import { importedQuestionsFromJSON } from './importedQuestions';
+import { newQuestionsSet } from './newQuestions';
 
 /**
  * 4 DISTINCT TEAMS FOR THE VULTURE CYPRUS ARENA:
@@ -100,10 +101,24 @@ export const defaultTeams: Team[] = [
 ];
 
 /**
- * 75 QUESTIONS FULLY MAPPED FROM:
- * ekpaideytiki-anafora-gypes-2026-10-29_1818ef45.json
+ * Idempotently merge question banks by unique ID
  */
-export const defaultQuestions: Question[] = importedQuestionsFromJSON;
+export function mergeQuestionBanks(existing: Question[], incoming: Question[]): Question[] {
+  if (!Array.isArray(existing)) return incoming || [];
+  if (!Array.isArray(incoming)) return existing || [];
+  const existingIds = new Set(existing.map((q) => q.id));
+  const newUnique = incoming.filter((q) => !existingIds.has(q.id));
+  return [...existing, ...newUnique];
+}
+
+/**
+ * COMBINED AUTHORITATIVE QUESTION BANK:
+ * 75 authentic original questions + 48 new questions (idempotent, 123 total)
+ */
+export const defaultQuestions: Question[] = mergeQuestionBanks(
+  importedQuestionsFromJSON,
+  newQuestionsSet
+);
 
 /**
  * DEFAULT GAME ARENA CONFIGURATION OBJECT

@@ -7,10 +7,12 @@ import React, { useState, useMemo, useEffect, useRef } from 'react';
 import {
   defaultTeams,
   defaultQuestions,
+  mergeQuestionBanks,
   calculateTotalPoints,
   getQuestionsByTeam,
   getQuestionsByType,
 } from './data/defaultGame';
+import { newQuestionsSet } from './data/newQuestions';
 import {
   Question,
   QuestionType,
@@ -28,9 +30,24 @@ import { TeamPosterData, TeamPhotoSubmission, SavedTeamReflection } from './type
 import { initialDefaultPosters } from './data/teamScientificFacts';
 import { selectPosterFactsForTeam } from './utils/posterContentSelector';
 
+export function isSurveyQuestion(q?: Question | null): boolean {
+  if (!q) return false;
+  if (q.id === 'gypes-new-q-48' || q.id === 'gypes-q-74') return true;
+  const title = (q.title || '').toLowerCase();
+  const mission = (q.missionTitle || '').toLowerCase();
+  return (
+    title.includes('δημοσκόπηση') ||
+    title.includes('survey') ||
+    mission.includes('δημοσκόπηση') ||
+    mission.includes('survey') ||
+    title.includes('θεωρειτε εσεις πιο σημαντική') ||
+    title.includes('θεωρείτε εσείς πιο σημαντική')
+  );
+}
+
 export function isReflectionQuestion(q?: Question | null): boolean {
   if (!q) return false;
-  if (['gypes-q-16', 'gypes-q-35', 'gypes-q-54', 'gypes-q-74'].includes(q.id)) return true;
+  if (['gypes-q-16', 'gypes-q-35', 'gypes-q-56', 'gypes-q-75'].includes(q.id)) return true;
   const title = (q.title || '').toLowerCase();
   const mission = (q.missionTitle || '').toLowerCase();
   const prompt = ((q as any).taskPrompt || '').toLowerCase();
@@ -164,7 +181,7 @@ export default function App() {
     return defaultTeams;
   });
 
-  // State for Questions (75 questions mapped directly from JSON, reorderable, togglable, reassignable)
+  // State for Questions (Original 75 questions + 48 new questions, idempotent)
   const [questions, setQuestions] = useState<Question[]>(() => {
     if (typeof window !== 'undefined') {
       const saved = localStorage.getItem('vulture_questions_custom_v2');
@@ -172,7 +189,7 @@ export default function App() {
         try {
           const parsed = JSON.parse(saved);
           if (Array.isArray(parsed) && parsed.length >= 70) {
-            return parsed;
+            return mergeQuestionBanks(parsed, newQuestionsSet);
           }
         } catch (e) {
           console.error(e);
@@ -363,11 +380,18 @@ export default function App() {
     fetchServerQuestions().then(async (serverData) => {
       if (!isMounted || !serverData) return;
       if (serverData.exists && Array.isArray(serverData.questions) && serverData.questions.length > 0) {
-        setQuestions(serverData.questions);
+        const merged = mergeQuestionBanks(serverData.questions, newQuestionsSet);
+        setQuestions(merged);
         setServerQuestionVersion(serverData.version || 1);
         try {
-          localStorage.setItem('vulture_questions_custom_v2', JSON.stringify(serverData.questions));
+          localStorage.setItem('vulture_questions_custom_v2', JSON.stringify(merged));
         } catch {}
+        if (isAdminLoggedIn && merged.length > serverData.questions.length) {
+          const syncRes = await syncQuestionsToServer(merged, true, (serverData.version || 1) + 1);
+          if (syncRes.success && isMounted) {
+            setServerQuestionVersion(syncRes.version || (serverData.version || 1) + 1);
+          }
+        }
       } else if (!serverData.exists && isAdminLoggedIn) {
         // Bootstrap server bank from administrator's local bank (including all custom edits)
         const syncRes = await syncQuestionsToServer(questions, true, 1);
@@ -929,7 +953,7 @@ export default function App() {
     if (!tId) return;
     try {
       const teamQuestionsCount = questions.filter(
-        (q) => q.isActive && q.assignedTeamIds.includes(tId)
+        (q) => q.isActive && !q.isPendingAnswer && q.assignedTeamIds.includes(tId)
       ).length;
 
       // CRITICAL DATA SAFETY: Never overwrite server progress if existing server progress has higher count or score
@@ -1381,7 +1405,7 @@ function isYouTubeUrl(url: string): boolean {
   // Filtered list of questions for the Arena
   const activeQuestions = useMemo(() => {
     return questions.filter((q) => {
-      const matchesActive = q.isActive;
+      const matchesActive = q.isActive && !q.isPendingAnswer;
       const matchesTeam = selectedTeamFilter === 'all' || q.assignedTeamIds.includes(selectedTeamFilter);
       const matchesType = selectedTypeFilter === 'all' || q.type === selectedTypeFilter;
       const matchesSearch =
@@ -1448,7 +1472,7 @@ function isYouTubeUrl(url: string): boolean {
     // Stop student navigation when their team has completed all active assigned questions or reached the last question
     if (!isAdminLoggedIn && studentSelectedTeamId) {
       const teamAssigned = questions.filter(
-        (q) => q.isActive && q.assignedTeamIds.includes(studentSelectedTeamId)
+        (q) => q.isActive && !q.isPendingAnswer && q.assignedTeamIds.includes(studentSelectedTeamId)
       );
       const submittedSet = new Set(currentSubmittedIds);
       const allCompleted = teamAssigned.length > 0 && teamAssigned.every((q) => submittedSet.has(q.id));
@@ -1699,7 +1723,7 @@ function isYouTubeUrl(url: string): boolean {
       setSelectedTeamFilter(teamId);
       setSelectedPosterTeamId(teamId);
 
-      const teamQuestions = questions.filter((q) => q.isActive && q.assignedTeamIds.includes(teamId));
+      const teamQuestions = questions.filter((q) => q.isActive && !q.isPendingAnswer && q.assignedTeamIds.includes(teamId));
       const savedData = loadStudentDeviceProgress(teamId);
 
       if (savedData) {
@@ -1855,21 +1879,57 @@ function isYouTubeUrl(url: string): boolean {
   }, [activeQuestions.length, currentQuestionIndex]);
 
   // Toggle active status for question
-  const toggleQuestionActive = (id: string) => {
-    setQuestions((prev) =>
-      prev.map((q) => (q.id === id ? { ...q, isActive: !q.isActive } : q))
+  const toggleQuestionActive = async (id: string) => {
+    const targetQ = questions.find((q) => q.id === id);
+    if (targetQ && !targetQ.isActive && targetQ.isPendingAnswer) {
+      setExportToast({
+        type: 'warning',
+        title: language === 'el' ? 'Εκκρεμεί Απάντηση' : 'Pending Answer',
+        message:
+          language === 'el'
+            ? 'Η ερώτηση δεν μπορεί να ενεργοποιηθεί ακόμη, επειδή εκκρεμεί ορισμός της σωστής απάντησης. Κάντε κλικ στο μολύβι επεξεργασίας για να την ορίσετε.'
+            : 'Cannot activate question: Correct answer has not been entered yet. Click the edit icon to set it.',
+      });
+      return;
+    }
+
+    const nextQuestions = questions.map((q) =>
+      q.id === id ? { ...q, isActive: !q.isActive } : q
     );
+    setQuestions(nextQuestions);
+    try {
+      localStorage.setItem('vulture_questions_custom_v2', JSON.stringify(nextQuestions));
+    } catch {}
+
+    if (isAdminLoggedIn) {
+      const syncRes = await syncQuestionsToServer(nextQuestions, true);
+      if (syncRes.success) {
+        setServerQuestionVersion(syncRes.version || serverQuestionVersion + 1);
+      }
+    }
   };
 
   // Change which team a question is assigned to
-  const handleChangeQuestionTeam = (id: string, newTeamId: string) => {
-    setQuestions((prev) =>
-      prev.map((q) => (q.id === id ? { ...q, assignedTeamIds: [newTeamId] } : q))
+  const handleChangeQuestionTeam = async (id: string, newTeamId: string) => {
+    const nextQuestions = questions.map((q) =>
+      q.id === id ? { ...q, assignedTeamIds: [newTeamId] } : q
     );
+    setQuestions(nextQuestions);
+    try {
+      localStorage.setItem('vulture_questions_custom_v2', JSON.stringify(nextQuestions));
+    } catch {}
+
+    if (isAdminLoggedIn) {
+      const syncRes = await syncQuestionsToServer(nextQuestions, true);
+      if (syncRes.success) {
+        setServerQuestionVersion(syncRes.version || serverQuestionVersion + 1);
+      }
+    }
   };
 
   // Move Question UP (within team context or globally)
-  const handleMoveQuestionUp = (id: string, contextList?: Question[]) => {
+  const handleMoveQuestionUp = async (id: string, contextList?: Question[]) => {
+    let nextQuestions: Question[] | null = null;
     setQuestions((prev) => {
       if (contextList && contextList.length > 1) {
         const listIdx = contextList.findIndex((q) => q.id === id);
@@ -1882,6 +1942,7 @@ function isYouTubeUrl(url: string): boolean {
         const temp = copy[idxA];
         copy[idxA] = copy[idxB];
         copy[idxB] = temp;
+        nextQuestions = copy;
         return copy;
       }
       const index = prev.findIndex((q) => q.id === id);
@@ -1890,12 +1951,26 @@ function isYouTubeUrl(url: string): boolean {
       const temp = copy[index];
       copy[index] = copy[index - 1];
       copy[index - 1] = temp;
+      nextQuestions = copy;
       return copy;
     });
+
+    if (nextQuestions) {
+      try {
+        localStorage.setItem('vulture_questions_custom_v2', JSON.stringify(nextQuestions));
+      } catch {}
+      if (isAdminLoggedIn) {
+        const syncRes = await syncQuestionsToServer(nextQuestions, true);
+        if (syncRes.success) {
+          setServerQuestionVersion(syncRes.version || serverQuestionVersion + 1);
+        }
+      }
+    }
   };
 
   // Move Question DOWN (within team context or globally)
-  const handleMoveQuestionDown = (id: string, contextList?: Question[]) => {
+  const handleMoveQuestionDown = async (id: string, contextList?: Question[]) => {
+    let nextQuestions: Question[] | null = null;
     setQuestions((prev) => {
       if (contextList && contextList.length > 1) {
         const listIdx = contextList.findIndex((q) => q.id === id);
@@ -1908,6 +1983,7 @@ function isYouTubeUrl(url: string): boolean {
         const temp = copy[idxA];
         copy[idxA] = copy[idxB];
         copy[idxB] = temp;
+        nextQuestions = copy;
         return copy;
       }
       const index = prev.findIndex((q) => q.id === id);
@@ -1916,17 +1992,52 @@ function isYouTubeUrl(url: string): boolean {
       const temp = copy[index];
       copy[index] = copy[index + 1];
       copy[index + 1] = temp;
+      nextQuestions = copy;
       return copy;
     });
+
+    if (nextQuestions) {
+      try {
+        localStorage.setItem('vulture_questions_custom_v2', JSON.stringify(nextQuestions));
+      } catch {}
+      if (isAdminLoggedIn) {
+        const syncRes = await syncQuestionsToServer(nextQuestions, true);
+        if (syncRes.success) {
+          setServerQuestionVersion(syncRes.version || serverQuestionVersion + 1);
+        }
+      }
+    }
   };
 
   // Bulk active/inactive
-  const handleActivateAll = () => {
-    setQuestions((prev) => prev.map((q) => ({ ...q, isActive: true })));
+  const handleActivateAll = async () => {
+    const nextQuestions = questions.map((q) => (q.isPendingAnswer ? q : { ...q, isActive: true }));
+    setQuestions(nextQuestions);
+    try {
+      localStorage.setItem('vulture_questions_custom_v2', JSON.stringify(nextQuestions));
+    } catch {}
+
+    if (isAdminLoggedIn) {
+      const syncRes = await syncQuestionsToServer(nextQuestions, true);
+      if (syncRes.success) {
+        setServerQuestionVersion(syncRes.version || serverQuestionVersion + 1);
+      }
+    }
   };
 
-  const handleDeactivateAll = () => {
-    setQuestions((prev) => prev.map((q) => ({ ...q, isActive: false })));
+  const handleDeactivateAll = async () => {
+    const nextQuestions = questions.map((q) => ({ ...q, isActive: false }));
+    setQuestions(nextQuestions);
+    try {
+      localStorage.setItem('vulture_questions_custom_v2', JSON.stringify(nextQuestions));
+    } catch {}
+
+    if (isAdminLoggedIn) {
+      const syncRes = await syncQuestionsToServer(nextQuestions, true);
+      if (syncRes.success) {
+        setServerQuestionVersion(syncRes.version || serverQuestionVersion + 1);
+      }
+    }
   };
 
   // Check correctness of currently selected question
@@ -1935,9 +2046,12 @@ function isYouTubeUrl(url: string): boolean {
 
     switch (currentQ.type) {
       case 'multiple_choice':
+        if (isSurveyQuestion(currentQ)) {
+          return Boolean(userSingleChoice);
+        }
         return userSingleChoice === (currentQ as MultipleChoiceQuestion).correctAnswer;
       case 'multiple_choice_multi': {
-        const correct = (currentQ as MultipleChoiceMultiQuestion).correctAnswers.sort();
+        const correct = [...((currentQ as MultipleChoiceMultiQuestion).correctAnswers || [])].sort();
         const selected = [...userMultiChoice].sort();
         return JSON.stringify(correct) === JSON.stringify(selected);
       }
@@ -2188,11 +2302,11 @@ function isYouTubeUrl(url: string): boolean {
   };
 
   const totalPoints = useMemo(() => {
-    return questions.filter((q) => q.isActive).reduce((acc, q) => acc + q.points, 0);
+    return questions.filter((q) => q.isActive && !q.isPendingAnswer).reduce((acc, q) => acc + q.points, 0);
   }, [questions]);
 
   const activeCount = useMemo(() => {
-    return questions.filter((q) => q.isActive).length;
+    return questions.filter((q) => q.isActive && !q.isPendingAnswer).length;
   }, [questions]);
 
   // Admin Actions for Questions
@@ -2543,7 +2657,7 @@ function isYouTubeUrl(url: string): boolean {
   const isCurrentTeamActivitiesCompleted = useMemo(() => {
     if (!studentSelectedTeamId) return false;
     const teamAssignedQuestions = questions.filter(
-      (q) => q.isActive && q.assignedTeamIds.includes(studentSelectedTeamId)
+      (q) => q.isActive && !q.isPendingAnswer && q.assignedTeamIds.includes(studentSelectedTeamId)
     );
     const totalAssigned = teamAssignedQuestions.length;
     if (totalAssigned === 0) return false;
@@ -3483,7 +3597,7 @@ function isYouTubeUrl(url: string): boolean {
                       {teams.map((tm) => {
                         const progress = allTeamsProgress[tm.id];
                         const teamQuestions = questions.filter(
-                          (q) => q.isActive && q.assignedTeamIds.includes(tm.id)
+                          (q) => q.isActive && !q.isPendingAnswer && q.assignedTeamIds.includes(tm.id)
                         );
                         const totalAssigned = teamQuestions.length || 1;
                         const answered = progress?.answeredCount || 0;
@@ -3969,7 +4083,9 @@ function isYouTubeUrl(url: string): boolean {
                     <div className="grid grid-cols-1 gap-3">
                       {(activeQ as MultipleChoiceQuestion).options.map((option) => {
                         const isSelected = userSingleChoice === option.id;
-                        const isCorrect = (activeQ as MultipleChoiceQuestion).correctAnswer === option.id;
+                        const isCorrect = isSurveyQuestion(activeQ)
+                          ? isSelected
+                          : (activeQ as MultipleChoiceQuestion).correctAnswer === option.id;
 
                         let style =
                           'border-stone-200 bg-stone-50 hover:bg-stone-100 text-stone-800';
@@ -4017,7 +4133,7 @@ function isYouTubeUrl(url: string): boolean {
                       <div className="grid grid-cols-1 gap-3">
                         {(activeQ as MultipleChoiceMultiQuestion).options.map((option) => {
                           const isSelected = userMultiChoice.includes(option.id);
-                          const isCorrect = (activeQ as MultipleChoiceMultiQuestion).correctAnswers.includes(option.id);
+                          const isCorrect = (activeQ as MultipleChoiceMultiQuestion).correctAnswers?.includes(option.id) ?? false;
 
                           let style = 'border-stone-200 bg-stone-50 hover:bg-stone-100';
                           if (isSelected && !isAnswerSubmitted) {
@@ -5058,7 +5174,7 @@ function isYouTubeUrl(url: string): boolean {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               {teams.map((team) => {
                 const teamQuestions = questions.filter((q) => q.assignedTeamIds.includes(team.id));
-                const activeTeamQuestions = teamQuestions.filter((q) => q.isActive);
+                const activeTeamQuestions = teamQuestions.filter((q) => q.isActive && !q.isPendingAnswer);
                 const teamPoints = activeTeamQuestions.reduce((acc, q) => acc + q.points, 0);
 
                 return (
