@@ -1,0 +1,367 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global safety net: default-deny all unmatched paths
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // -------------------------------------------------------------------------
+    // Global Helpers
+    // -------------------------------------------------------------------------
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isBootstrappedAdmin() {
+      return isVerifiedUser() && request.auth.token.email == 'koulami34@gmail.com';
+    }
+
+    function isAdmin() {
+      return isBootstrappedAdmin() || (
+        isVerifiedUser() &&
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function isValidOptString(data, key, maxLen) {
+      return !(key in data) || (data[key] is string && data[key].size() <= maxLen);
+    }
+
+    function isValidOptBool(data, key) {
+      return !(key in data) || (data[key] is bool);
+    }
+
+    function isValidOptNumber(data, key) {
+      return !(key in data) || (data[key] is int || data[key] is float);
+    }
+
+    function isValidOptStringList(data, key, maxItems) {
+      return !(key in data) || (
+        data[key] is list &&
+        data[key].size() <= maxItems &&
+        (data[key].size() == 0 || (data[key][0] is string && data[key][0].size() <= 200))
+      );
+    }
+
+    function isValidOptMapList(data, key, maxItems) {
+      return !(key in data) || (
+        data[key] is list &&
+        data[key].size() <= maxItems &&
+        (data[key].size() == 0 || data[key][0] is map)
+      );
+    }
+
+    // -------------------------------------------------------------------------
+    // Entity Validation Blueprints (no existing()/diff() calls)
+    // -------------------------------------------------------------------------
+    function isValidQuestion(data, questionId) {
+      return data.keys().hasAll([
+          'id',
+          'type',
+          'title',
+          'assignedTeamIds',
+          'points',
+          'explanation',
+          'isActive',
+          'updatedAt',
+          'updatedByUid'
+        ]) &&
+        data.keys().hasOnly([
+          'id',
+          'type',
+          'missionTitle',
+          'title',
+          'instruction',
+          'assignedTeamIds',
+          'points',
+          'difficulty',
+          'explanation',
+          'isActive',
+          'isPendingAnswer',
+          'tags',
+          'mediaType',
+          'mediaUrl',
+          'mediaDocId',
+          'locationFocus',
+          'speciesFocus',
+          'options',
+          'correctAnswer',
+          'correctAnswers',
+          'leftHeader',
+          'rightHeader',
+          'pairs',
+          'promptImage',
+          'promptDescription',
+          'matchType',
+          'stationName',
+          'stationLocation',
+          'qrPayload',
+          'fieldClue',
+          'stationType',
+          'taskPrompt',
+          'verificationCriteria',
+          'exampleDescription',
+          'targetSubject',
+          'durationSecondsMax',
+          'orderIndex',
+          'updatedAt',
+          'updatedByUid'
+        ]) &&
+        isValidId(data.id) &&
+        data.id == questionId &&
+        data.type is string &&
+        data.type.size() <= 32 &&
+        data.type in [
+          'multiple_choice',
+          'multiple_choice_multi',
+          'true_false',
+          'text_matching',
+          'image_matching',
+          'qr_scan',
+          'photo_upload',
+          'video_upload'
+        ] &&
+        data.title is string &&
+        data.title.size() >= 1 &&
+        data.title.size() <= 2000 &&
+        data.assignedTeamIds is list &&
+        data.assignedTeamIds.size() <= 10 &&
+        (data.assignedTeamIds.size() == 0 || (data.assignedTeamIds[0] is string && data.assignedTeamIds[0].size() <= 64)) &&
+        (data.points is int || data.points is float) &&
+        data.points >= 0 &&
+        data.points <= 1000 &&
+        data.explanation is string &&
+        data.explanation.size() <= 3000 &&
+        data.isActive is bool &&
+        data.updatedAt == request.time &&
+        isValidId(data.updatedByUid) &&
+        data.updatedByUid == request.auth.uid &&
+        isValidOptString(data, 'missionTitle', 200) &&
+        isValidOptString(data, 'instruction', 1000) &&
+        (!('difficulty' in data) || (data.difficulty is string && data.difficulty.size() <= 16 && data.difficulty in ['easy', 'medium', 'hard'])) &&
+        isValidOptBool(data, 'isPendingAnswer') &&
+        isValidOptStringList(data, 'tags', 20) &&
+        (!('mediaType' in data) || (data.mediaType is string && data.mediaType.size() <= 16 && data.mediaType in ['image', 'video', 'none'])) &&
+        isValidOptString(data, 'mediaUrl', 4096) &&
+        (!('mediaDocId' in data) || isValidId(data.mediaDocId)) &&
+        (!('locationFocus' in data) || (data.locationFocus is string && data.locationFocus.size() <= 32 && data.locationFocus in ['Cyprus', 'Greece', 'Both', 'Mediterranean'])) &&
+        isValidOptStringList(data, 'speciesFocus', 10) &&
+        isValidOptMapList(data, 'options', 20) &&
+        (!('correctAnswer' in data) || (data.correctAnswer is bool) || (data.correctAnswer is string && data.correctAnswer.size() <= 200)) &&
+        isValidOptStringList(data, 'correctAnswers', 20) &&
+        isValidOptString(data, 'leftHeader', 200) &&
+        isValidOptString(data, 'rightHeader', 200) &&
+        isValidOptMapList(data, 'pairs', 20) &&
+        isValidOptString(data, 'promptImage', 4096) &&
+        isValidOptString(data, 'promptDescription', 2000) &&
+        (!('matchType' in data) || (data.matchType is string && data.matchType.size() <= 32 && data.matchType in ['identify_species', 'identify_silhouette', 'pair_equipment', 'identify_nest'])) &&
+        isValidOptString(data, 'stationName', 200) &&
+        isValidOptString(data, 'stationLocation', 300) &&
+        isValidOptString(data, 'qrPayload', 500) &&
+        isValidOptString(data, 'fieldClue', 2000) &&
+        (!('stationType' in data) || (data.stationType is string && data.stationType.size() <= 40 && data.stationType in ['nesting_cliff', 'feeding_station', 'patrol_post', 'information_center', 'acclimatization_aviary'])) &&
+        isValidOptString(data, 'taskPrompt', 2000) &&
+        isValidOptStringList(data, 'verificationCriteria', 20) &&
+        isValidOptString(data, 'exampleDescription', 1000) &&
+        isValidOptString(data, 'targetSubject', 64) &&
+        (!('durationSecondsMax' in data) || ((data.durationSecondsMax is int || data.durationSecondsMax is float) && data.durationSecondsMax >= 0 && data.durationSecondsMax <= 3600)) &&
+        (!('orderIndex' in data) || ((data.orderIndex is int || data.orderIndex is float) && data.orderIndex >= 0 && data.orderIndex <= 100000));
+    }
+
+    function isValidQuestionBankMeta(data, metaId) {
+      return data.keys().hasAll(['id', 'version', 'totalCount', 'activeCount', 'updatedAt', 'updatedByUid']) &&
+        data.keys().hasOnly(['id', 'version', 'totalCount', 'activeCount', 'updatedAt', 'updatedByUid']) &&
+        isValidId(data.id) &&
+        data.id == metaId &&
+        (data.version is int || data.version is float) &&
+        data.version >= 0 &&
+        data.version <= 1000000 &&
+        (data.totalCount is int || data.totalCount is float) &&
+        data.totalCount >= 0 &&
+        data.totalCount <= 10000 &&
+        (data.activeCount is int || data.activeCount is float) &&
+        data.activeCount >= 0 &&
+        data.activeCount <= 10000 &&
+        data.updatedAt == request.time &&
+        isValidId(data.updatedByUid) &&
+        data.updatedByUid == request.auth.uid;
+    }
+
+    function isValidQuestionMedia(data, questionId) {
+      return data.keys().hasAll(['questionId', 'mimeType', 'dataUrl', 'byteSize', 'updatedAt', 'updatedByUid']) &&
+        data.keys().hasOnly(['questionId', 'mimeType', 'dataUrl', 'byteSize', 'width', 'height', 'updatedAt', 'updatedByUid']) &&
+        isValidId(data.questionId) &&
+        data.questionId == questionId &&
+        data.mimeType is string &&
+        data.mimeType.size() <= 32 &&
+        data.mimeType in ['image/webp', 'image/jpeg', 'image/png'] &&
+        data.dataUrl is string &&
+        data.dataUrl.size() >= 20 &&
+        data.dataUrl.size() <= 800000 &&
+        data.dataUrl.matches('^data:image/(webp|jpeg|png);base64,[A-Za-z0-9+/=]+$') &&
+        (data.byteSize is int || data.byteSize is float) &&
+        data.byteSize > 0 &&
+        data.byteSize <= 700000 &&
+        isValidOptNumber(data, 'width') &&
+        (!('width' in data) || (data.width > 0 && data.width <= 8192)) &&
+        isValidOptNumber(data, 'height') &&
+        (!('height' in data) || (data.height > 0 && data.height <= 8192)) &&
+        data.updatedAt == request.time &&
+        isValidId(data.updatedByUid) &&
+        data.updatedByUid == request.auth.uid;
+    }
+
+    function isValidAdminUser(data, uid) {
+      return data.keys().hasAll(['uid', 'email', 'role', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'role', 'createdAt', 'updatedAt']) &&
+        isValidId(data.uid) &&
+        data.uid == uid &&
+        data.email is string &&
+        data.email.size() >= 3 &&
+        data.email.size() <= 254 &&
+        data.role is string &&
+        data.role.size() <= 16 &&
+        data.role == 'admin' &&
+        data.createdAt is timestamp &&
+        data.updatedAt == request.time;
+    }
+
+    // -------------------------------------------------------------------------
+    // Collection Rules
+    // -------------------------------------------------------------------------
+
+    // Educational question bank (zero PII: public gameplay read, admin-only write)
+    match /questions/{questionId} {
+      allow get: if isValidId(questionId);
+      allow list: if existing().id is string && existing().type is string && existing().isActive is bool;
+      allow create: if isValidId(questionId) &&
+        isAdmin() &&
+        isValidQuestion(incoming(), questionId);
+      allow update: if isValidId(questionId) &&
+        isValidQuestion(incoming(), questionId) &&
+        isAdmin() &&
+        incoming().id == existing().id &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'type',
+          'missionTitle',
+          'title',
+          'instruction',
+          'assignedTeamIds',
+          'points',
+          'difficulty',
+          'explanation',
+          'isActive',
+          'isPendingAnswer',
+          'tags',
+          'mediaType',
+          'mediaUrl',
+          'mediaDocId',
+          'locationFocus',
+          'speciesFocus',
+          'options',
+          'correctAnswer',
+          'correctAnswers',
+          'leftHeader',
+          'rightHeader',
+          'pairs',
+          'promptImage',
+          'promptDescription',
+          'matchType',
+          'stationName',
+          'stationLocation',
+          'qrPayload',
+          'fieldClue',
+          'stationType',
+          'taskPrompt',
+          'verificationCriteria',
+          'exampleDescription',
+          'targetSubject',
+          'durationSecondsMax',
+          'orderIndex',
+          'updatedAt',
+          'updatedByUid'
+        ]);
+      allow delete: if isValidId(questionId) && isAdmin();
+    }
+
+    // Question bank sync metadata (zero PII: public gameplay read, admin-only write)
+    match /questionBankMeta/{metaId} {
+      allow get: if isValidId(metaId);
+      allow list: if existing().id is string && (existing().version is int || existing().version is float);
+      allow create: if isValidId(metaId) &&
+        isAdmin() &&
+        isValidQuestionBankMeta(incoming(), metaId);
+      allow update: if isValidId(metaId) &&
+        isValidQuestionBankMeta(incoming(), metaId) &&
+        isAdmin() &&
+        incoming().id == existing().id &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'version',
+          'totalCount',
+          'activeCount',
+          'updatedAt',
+          'updatedByUid'
+        ]);
+      allow delete: if isValidId(metaId) && isAdmin();
+    }
+
+    // Compressed teacher-uploaded question images (zero PII: public gameplay read, admin-only write)
+    match /questionMedia/{questionId} {
+      allow get: if isValidId(questionId);
+      allow list: if existing().questionId is string && existing().mimeType is string;
+      allow create: if isValidId(questionId) &&
+        isAdmin() &&
+        isValidQuestionMedia(incoming(), questionId);
+      allow update: if isValidId(questionId) &&
+        isValidQuestionMedia(incoming(), questionId) &&
+        isAdmin() &&
+        incoming().questionId == existing().questionId &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'mimeType',
+          'dataUrl',
+          'byteSize',
+          'width',
+          'height',
+          'updatedAt',
+          'updatedByUid'
+        ]);
+      allow delete: if isValidId(questionId) && isAdmin();
+    }
+
+    // Admin allowlist (contains admin email PII: strictly isolated to owner or admin)
+    match /admins/{uid} {
+      allow get: if isValidId(uid) && (isAdmin() || (isVerifiedUser() && request.auth.uid == uid));
+      allow list: if isAdmin() && existing().uid is string && existing().role == 'admin';
+      allow create: if isValidId(uid) &&
+        isBootstrappedAdmin() &&
+        isValidAdminUser(incoming(), uid) &&
+        incoming().createdAt == request.time;
+      allow update: if isValidId(uid) &&
+        isValidAdminUser(incoming(), uid) &&
+        isBootstrappedAdmin() &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['email', 'role', 'updatedAt']);
+      allow delete: if isValidId(uid) && isBootstrappedAdmin();
+    }
+  }
+}

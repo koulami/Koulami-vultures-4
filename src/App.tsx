@@ -96,6 +96,7 @@ import {
   syncQuestionsToServer,
 } from './utils/questionSyncManager';
 import { ClearGameDataModal } from './components/ClearGameDataModal';
+import { ImageKitSandboxModal } from './components/ImageKitSandboxModal';
 import { Language, translations } from './i18n/translations';
 import { getLocalizedQuestion } from './i18n/questionTranslations';
 import {
@@ -280,6 +281,7 @@ export default function App() {
   const [isAdminReportOpen, setIsAdminReportOpen] = useState<boolean>(false);
   const [isQRScannerOpen, setIsQRScannerOpen] = useState<boolean>(false);
   const [isClearGameDataOpen, setIsClearGameDataOpen] = useState<boolean>(false);
+  const [isImageKitSandboxOpen, setIsImageKitSandboxOpen] = useState<boolean>(false);
   const [exportToast, setExportToast] = useState<{
     type: 'success' | 'error' | 'warning';
     title: string;
@@ -2881,6 +2883,15 @@ function isYouTubeUrl(url: string): boolean {
               title={language === 'el' ? 'Επαναφορά αρχικών δεδομένων αναφοράς (75 ερωτήσεις)' : 'Reset to default reference data (75 questions)'}
             >
               <RotateCcw className="w-3.5 h-3.5" /> {t.resetDefaults}
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsImageKitSandboxOpen(true)}
+              className="px-2.5 py-1 bg-sky-800 hover:bg-sky-900 text-sky-100 border border-sky-500/60 rounded-lg transition-colors flex items-center gap-1 cursor-pointer text-xs font-bold shadow-2xs"
+              title={language === 'en' ? 'Open isolated ImageKit Sandbox Test' : 'Άνοιγμα απομονωμένου ImageKit Sandbox Test'}
+            >
+              <ImageIcon className="w-3.5 h-3.5 text-sky-300" />
+              <span>ImageKit Sandbox Test</span>
             </button>
             <button
               onClick={() => {
@@ -5661,6 +5672,13 @@ function isYouTubeUrl(url: string): boolean {
         isOpen={isClearGameDataOpen}
         onClose={() => setIsClearGameDataOpen(false)}
         onConfirmClear={handleConfirmClearGameData}
+        language={language}
+      />
+
+      {/* 11. Admin-only Isolated ImageKit Sandbox Test Modal */}
+      <ImageKitSandboxModal
+        isOpen={isImageKitSandboxOpen}
+        onClose={() => setIsImageKitSandboxOpen(false)}
         language={language}
       />
 

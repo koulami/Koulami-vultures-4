@@ -3,23 +3,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { Question, Team } from '../types/game';
 import { formatAllAnswersText, formatCorrectAnswerText, formatAssignedTeams } from '../utils/questionExportManager';
 import {
   X,
   Printer,
+  Download,
   Filter,
   CheckCircle2,
   XCircle,
-  HelpCircle,
-  Layers,
-  Sparkles,
   BookOpen,
   Image,
-  QrCode,
-  Camera,
-  Video,
+  AlertTriangle,
 } from 'lucide-react';
 
 interface PrintableQuestionRegisterModalProps {
@@ -44,6 +41,13 @@ export const PrintableQuestionRegisterModal: React.FC<PrintableQuestionRegisterM
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'inactive'>('all');
   const [typeFilter, setTypeFilter] = useState<string>('all');
   const [languageMode, setLanguageMode] = useState<'both' | 'el' | 'en'>('both');
+  const [printBlockedNotice, setPrintBlockedNotice] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (!isOpen) {
+      setPrintBlockedNotice(false);
+    }
+  }, [isOpen]);
 
   // Filtered question set
   const filteredQuestions = useMemo(() => {
@@ -74,8 +78,173 @@ export const PrintableQuestionRegisterModal: React.FC<PrintableQuestionRegisterM
 
   if (!isOpen) return null;
 
+  const escapeHtml = (val: unknown): string => {
+    return String(val ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  };
+
+  const handleDownloadPrintableHtml = () => {
+    const dateStr = new Date().toISOString().split('T')[0];
+    const docTitle = isEn
+      ? 'Official Educational Question Register'
+      : 'Επίσημο Μητρώο Εκπαιδευτικών Ερωτήσεων & Αποστολών';
+
+    const cardsHtml = filteredQuestions
+      .map((q, idx) => {
+        const qAny = q as any;
+        const assignedTeamsText = formatAssignedTeams(q.assignedTeamIds, teams, language);
+        const allAnswers = formatAllAnswersText(q, language);
+        const correctAnswer = formatCorrectAnswerText(q, language);
+        const showGreek = languageMode === 'both' || languageMode === 'el';
+        const showEnglish = (languageMode === 'both' || languageMode === 'en') && (qAny.titleEn || qAny.explanationEn);
+
+        return `
+          <article class="card">
+            <div class="card-top">
+              <div class="badges">
+                <span class="num">#${idx + 1}</span>
+                <span class="qid">${escapeHtml(q.id)}</span>
+                <span class="status ${q.isActive ? 'active' : 'inactive'}">${q.isActive ? (isEn ? 'Active' : 'Ενεργή') : (isEn ? 'Inactive' : 'Ανενεργή')}</span>
+                <span class="qtype">${escapeHtml(getTypeLabel(q.type))}</span>
+              </div>
+              <div class="meta-right">
+                <span class="diff">${escapeHtml(getDifficultyBadge(q.difficulty))}</span>
+                <span class="pts">${escapeHtml(q.points)} pts</span>
+              </div>
+            </div>
+            <div class="sub">
+              <div><strong>${isEn ? 'Assigned Teams:' : 'Ανατεθειμένη Ομάδα:'}</strong> ${escapeHtml(assignedTeamsText)}</div>
+              ${q.missionTitle ? `<div class="mission">🎯 ${escapeHtml(q.missionTitle)}</div>` : ''}
+            </div>
+            ${showGreek ? `<div class="prompt"><span class="lbl">${isEn ? 'Greek Question Prompt:' : 'Εκφώνηση Ερώτησης:'}</span><h3>${escapeHtml(q.title)}</h3></div>` : ''}
+            ${showEnglish && qAny.titleEn ? `<div class="prompt-en"><span class="lbl">English Translation:</span><p>${escapeHtml(qAny.titleEn)}</p></div>` : ''}
+            <div class="box">
+              <span class="lbl">${isEn ? 'All Answer Options:' : 'Όλες οι Επιλογές Απάντησης:'}</span>
+              <div class="mono">${escapeHtml(allAnswers)}</div>
+            </div>
+            <div class="box answer">
+              <span class="lbl">${isEn ? 'Verified Correct Answer:' : 'Επίσημη Σωστή Απάντηση:'}</span>
+              <div><strong>${escapeHtml(correctAnswer)}</strong></div>
+            </div>
+            ${
+              q.explanation || qAny.explanationEn
+                ? `<div class="box notes">
+                    <span class="lbl">${isEn ? 'Scientific Explanation & Notes:' : 'Επιστημονική Επεξήγηση Πεδίου:'}</span>
+                    ${showGreek && q.explanation ? `<p>${escapeHtml(q.explanation)}</p>` : ''}
+                    ${showEnglish && qAny.explanationEn ? `<p class="en">${escapeHtml(qAny.explanationEn)}</p>` : ''}
+                  </div>`
+                : ''
+            }
+            ${q.mediaUrl ? `<div class="media"><strong>${isEn ? 'Media Resource:' : 'Πολυμέσο:'}</strong> ${escapeHtml(q.mediaUrl)}</div>` : ''}
+          </article>
+        `;
+      })
+      .join('\n');
+
+    const html = `<!doctype html>
+<html lang="${isEn ? 'en' : 'el'}">
+<head>
+  <meta charset="utf-8" />
+  <title>${escapeHtml(docTitle)}</title>
+  <style>
+    @page { size: A4 portrait; margin: 12mm 10mm; }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color: #1c1917; background: #f5f5f4; margin: 0; padding: 20px; }
+    .toolbar { max-width: 900px; margin: 0 auto 16px; background: #1c1917; color: #fff; padding: 12px 18px; border-radius: 12px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .toolbar button { background: #d97706; color: #1c1917; border: none; font-weight: 800; padding: 9px 16px; border-radius: 8px; cursor: pointer; font-size: 13px; }
+    .page { max-width: 900px; margin: 0 auto; background: #fff; padding: 28px; border-radius: 16px; border: 1px solid #e7e5e4; }
+    .header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; border-bottom: 2px solid #1c1917; padding-bottom: 14px; margin-bottom: 20px; }
+    .header h1 { margin: 6px 0 4px; font-size: 20px; }
+    .header p { margin: 0; font-size: 12px; color: #57534e; }
+    .badge { display: inline-block; font-size: 11px; font-weight: 800; background: #fef3c7; color: #92400e; border: 1px solid #fcd34d; padding: 2px 8px; border-radius: 6px; }
+    .summary { text-align: right; background: #fafaf9; border: 1px solid #e7e5e4; padding: 10px 14px; border-radius: 10px; font-size: 12px; white-space: nowrap; }
+    .card { border: 1px solid #d6d3d1; border-radius: 12px; padding: 14px 16px; margin-bottom: 12px; page-break-inside: avoid; break-inside: avoid; background: #fff; }
+    .card-top { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; border-bottom: 1px solid #e7e5e4; padding-bottom: 8px; margin-bottom: 8px; font-size: 11px; }
+    .badges, .meta-right { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .num { background: #1c1917; color: #fff; font-weight: 800; padding: 2px 7px; border-radius: 6px; }
+    .qid { font-family: monospace; background: #fafaf9; border: 1px solid #e7e5e4; padding: 2px 6px; border-radius: 5px; }
+    .status.active { background: #ecfdf5; color: #065f46; border: 1px solid #a7f3d0; padding: 2px 7px; border-radius: 5px; font-weight: 700; }
+    .status.inactive { background: #e7e5e4; color: #57534e; padding: 2px 7px; border-radius: 5px; font-weight: 700; }
+    .qtype { background: #fef3c7; color: #78350f; border: 1px solid #fcd34d; padding: 2px 7px; border-radius: 5px; font-weight: 700; }
+    .pts { background: #fffbeb; color: #92400e; border: 1px solid #fde68a; padding: 2px 8px; border-radius: 5px; font-weight: 800; }
+    .sub { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 6px; font-size: 11px; color: #57534e; margin-bottom: 8px; }
+    .mission { background: #f5f5f4; padding: 2px 8px; border-radius: 5px; font-weight: 600; }
+    .lbl { display: block; font-size: 10px; font-weight: 800; text-transform: uppercase; color: #78716c; margin-bottom: 2px; }
+    .prompt h3 { margin: 0 0 8px; font-size: 14px; line-height: 1.4; }
+    .prompt-en p { margin: 0 0 8px; font-size: 12px; font-style: italic; color: #44403c; }
+    .box { border: 1px solid #e7e5e4; border-radius: 8px; padding: 8px 10px; margin-top: 6px; font-size: 12px; }
+    .box.answer { background: #ecfdf5; border-color: #a7f3d0; color: #064e3b; }
+    .box.notes { background: #f5f5f4; }
+    .box.notes p { margin: 2px 0; line-height: 1.4; }
+    .box.notes p.en { font-style: italic; color: #57534e; border-top: 1px solid #e7e5e4; padding-top: 4px; margin-top: 4px; }
+    .mono { font-family: monospace; font-size: 11px; line-height: 1.45; }
+    .media { margin-top: 6px; font-size: 11px; color: #57534e; word-break: break-all; }
+    @media print {
+      body { background: #fff; padding: 0; }
+      .toolbar { display: none !important; }
+      .page { border: none; padding: 0; max-width: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <span><strong>${escapeHtml(docTitle)}</strong> (${filteredQuestions.length} ${isEn ? 'questions' : 'ερωτήσεις'})</span>
+    <button onclick="window.print()">🖨️ ${isEn ? 'Print / Save as PDF' : 'Εκτύπωση / Αποθήκευση PDF'}</button>
+  </div>
+  <main class="page">
+    <header class="header">
+      <div>
+        <span class="badge">LIFE with Vultures • LIFE18 NAT/CY/001018</span>
+        <h1>${escapeHtml(docTitle)}</h1>
+        <p>«Στο χείλος της εξαφάνισης - οι Γύπες στην Κύπρο» (Gyps fulvus) • ${escapeHtml(new Date().toLocaleDateString())}</p>
+      </div>
+      <div class="summary">
+        <div><strong>${filteredQuestions.length}</strong> ${isEn ? 'Questions' : 'Ερωτήσεις'}</div>
+        <div>${totalPoints} pts • ${activeCount} ${isEn ? 'active' : 'ενεργές'}</div>
+      </div>
+    </header>
+    ${cardsHtml}
+  </main>
+</body>
+</html>`;
+
+    const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `vulture-questions-register-${dateStr}.html`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    setPrintBlockedNotice(false);
+  };
+
   const handlePrint = () => {
-    window.print();
+    setPrintBlockedNotice(false);
+    let printDialogTriggered = false;
+    const onBeforePrint = () => {
+      printDialogTriggered = true;
+    };
+    window.addEventListener('beforeprint', onBeforePrint, { once: true });
+
+    try {
+      window.print();
+    } catch {
+      printDialogTriggered = false;
+    }
+
+    // In embedded preview iframes without allow-modals, window.print() fails silently
+    setTimeout(() => {
+      window.removeEventListener('beforeprint', onBeforePrint);
+      if (!printDialogTriggered) {
+        setPrintBlockedNotice(true);
+      }
+    }, 400);
   };
 
   const getTypeLabel = (type: string) => {
@@ -112,8 +281,8 @@ export const PrintableQuestionRegisterModal: React.FC<PrintableQuestionRegisterM
     }
   };
 
-  return (
-    <div className="fixed inset-0 z-50 overflow-y-auto bg-stone-950/85 backdrop-blur-xs flex flex-col items-center justify-start p-2 sm:p-6">
+  const modalContent = (
+    <div className="printable-register-overlay fixed inset-0 z-50 overflow-y-auto bg-stone-950/85 backdrop-blur-xs flex flex-col items-center justify-start p-2 sm:p-6">
       {/* Print styles */}
       <style>{`
         @media print {
@@ -121,24 +290,43 @@ export const PrintableQuestionRegisterModal: React.FC<PrintableQuestionRegisterM
             size: A4 portrait;
             margin: 12mm 10mm 12mm 10mm;
           }
-          body {
+          html, body {
+            height: auto !important;
+            overflow: visible !important;
             background: white !important;
             color: #1c1917 !important;
+          }
+          #root {
+            display: none !important;
+          }
+          .printable-register-overlay {
+            position: static !important;
+            inset: auto !important;
+            overflow: visible !important;
+            background: white !important;
+            padding: 0 !important;
+            display: block !important;
           }
           .no-print,
           .no-print * {
             display: none !important;
           }
           .print-area {
-            position: absolute !important;
-            left: 0 !important;
-            top: 0 !important;
+            position: static !important;
             width: 100% !important;
+            max-width: none !important;
             margin: 0 !important;
             padding: 0 !important;
+            overflow: visible !important;
             background: white !important;
             box-shadow: none !important;
             border: none !important;
+            border-radius: 0 !important;
+          }
+          .print-scroll-body {
+            max-height: none !important;
+            overflow: visible !important;
+            padding: 0 !important;
           }
           .print-question-card {
             page-break-inside: avoid !important;
@@ -174,8 +362,19 @@ export const PrintableQuestionRegisterModal: React.FC<PrintableQuestionRegisterM
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <button
+              type="button"
+              onClick={handleDownloadPrintableHtml}
+              className="px-3.5 py-2 bg-stone-800 hover:bg-stone-700 text-stone-100 border border-stone-700 font-bold text-xs sm:text-sm rounded-xl transition-all shadow-sm flex items-center gap-1.5 cursor-pointer"
+              title={isEn ? 'Download Printable Document (.html)' : 'Λήψη Εκτυπώσιμου Αρχείου (.html)'}
+            >
+              <Download className="w-4 h-4 text-emerald-400" />
+              <span>{isEn ? 'Save Printable (.html)' : 'Αποθήκευση Αρχείου (.html)'}</span>
+            </button>
+
+            <button
+              type="button"
               onClick={handlePrint}
               className="px-4 py-2 bg-amber-600 hover:bg-amber-500 text-stone-950 font-black text-xs sm:text-sm rounded-xl transition-all shadow-md flex items-center gap-1.5 cursor-pointer"
             >
@@ -184,6 +383,7 @@ export const PrintableQuestionRegisterModal: React.FC<PrintableQuestionRegisterM
             </button>
 
             <button
+              type="button"
               onClick={onClose}
               className="p-2 bg-stone-800 hover:bg-stone-700 text-stone-300 hover:text-white rounded-xl transition-colors cursor-pointer"
               title={isEn ? 'Close' : 'Κλείσιμο'}
@@ -192,6 +392,35 @@ export const PrintableQuestionRegisterModal: React.FC<PrintableQuestionRegisterM
             </button>
           </div>
         </div>
+
+        {/* Sandboxed Iframe Print Notice (if browser blocked window.print()) */}
+        {printBlockedNotice && (
+          <div className="no-print bg-amber-50 border-b border-amber-300 px-5 py-3 flex flex-wrap items-center justify-between gap-3 text-xs text-amber-950">
+            <div className="flex items-start gap-2.5">
+              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+              <div>
+                <strong>
+                  {isEn
+                    ? 'The preview frame blocked the system print dialog.'
+                    : 'Το παράθυρο προεπισκόπησης μπλόκαρε τον διάλογο εκτύπωσης του προγράμματος περιήγησης.'}
+                </strong>{' '}
+                <span>
+                  {isEn
+                    ? 'Click "Save Printable (.html)" to download the formatted register and print/save as PDF from your browser, or open the Shared App URL in a regular browser tab.'
+                    : 'Πατήστε «Αποθήκευση Αρχείου (.html)» για να κατεβάσετε τη διαμορφωμένη λίστα και να την εκτυπώσετε/αποθηκεύσετε ως PDF, ή ανοίξτε την εφαρμογή σε κανονική καρτέλα.'}
+                </span>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={handleDownloadPrintableHtml}
+              className="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-stone-950 font-black rounded-lg flex items-center gap-1.5 shrink-0 cursor-pointer"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>{isEn ? 'Download Printable (.html)' : 'Λήψη Εκτυπώσιμου (.html)'}</span>
+            </button>
+          </div>
+        )}
 
         {/* Filter Controls Row (Hidden during print) */}
         <div className="no-print bg-stone-50 border-b border-stone-200 p-4 space-y-3">
@@ -277,7 +506,7 @@ export const PrintableQuestionRegisterModal: React.FC<PrintableQuestionRegisterM
         </div>
 
         {/* Printable Document Body */}
-        <div className="p-6 sm:p-8 space-y-6 max-h-[75vh] overflow-y-auto">
+        <div className="print-scroll-body p-6 sm:p-8 space-y-6 max-h-[75vh] overflow-y-auto">
           {/* Document Header (Shown on Paper and Screen) */}
           <div className="border-b-2 border-stone-800 pb-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
             <div>
@@ -484,8 +713,17 @@ export const PrintableQuestionRegisterModal: React.FC<PrintableQuestionRegisterM
               : 'Επιλέξτε «Αποθήκευση ως PDF» στον διάλογο εκτύπωσης για ψηφιακό αρχείο.'}
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <button
+              type="button"
+              onClick={handleDownloadPrintableHtml}
+              className="px-3.5 py-2 bg-emerald-700 hover:bg-emerald-600 text-white font-bold rounded-xl transition-colors flex items-center gap-1.5 cursor-pointer"
+            >
+              <Download className="w-4 h-4" />
+              <span>{isEn ? 'Save Printable (.html)' : 'Αποθήκευση Αρχείου (.html)'}</span>
+            </button>
+            <button
+              type="button"
               onClick={handlePrint}
               className="px-4 py-2 bg-stone-900 hover:bg-stone-800 text-white font-bold rounded-xl transition-colors flex items-center gap-1.5 cursor-pointer"
             >
@@ -493,6 +731,7 @@ export const PrintableQuestionRegisterModal: React.FC<PrintableQuestionRegisterM
               <span>{isEn ? 'Print / Export PDF' : 'Εκτύπωση / Εξαγωγή PDF'}</span>
             </button>
             <button
+              type="button"
               onClick={onClose}
               className="px-4 py-2 bg-stone-200 hover:bg-stone-300 text-stone-800 font-bold rounded-xl transition-colors cursor-pointer"
             >
@@ -503,4 +742,9 @@ export const PrintableQuestionRegisterModal: React.FC<PrintableQuestionRegisterM
       </div>
     </div>
   );
+
+  if (typeof document !== 'undefined') {
+    return createPortal(modalContent, document.body);
+  }
+  return modalContent;
 };

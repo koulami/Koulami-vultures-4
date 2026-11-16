@@ -1,0 +1,397 @@
+{
+  "entities": {
+    "Question": {
+      "title": "Question",
+      "description": "An educational field-challenge or quiz question in the Vulture Arena question bank (zero PII).",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique identifier matching the Firestore document ID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "type": {
+          "type": "string",
+          "description": "Question interaction type.",
+          "enum": [
+            "multiple_choice",
+            "multiple_choice_multi",
+            "true_false",
+            "text_matching",
+            "image_matching",
+            "qr_scan",
+            "photo_upload",
+            "video_upload"
+          ],
+          "maxLength": 32
+        },
+        "missionTitle": {
+          "type": "string",
+          "description": "Short mission title shown above the prompt.",
+          "maxLength": 200
+        },
+        "title": {
+          "type": "string",
+          "description": "Question prompt text.",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "instruction": {
+          "type": "string",
+          "description": "Optional instruction hint for students.",
+          "maxLength": 1000
+        },
+        "assignedTeamIds": {
+          "type": "array",
+          "description": "Bounded list of team IDs assigned to this question."
+        },
+        "points": {
+          "type": "number",
+          "description": "Points awarded for a correct answer."
+        },
+        "difficulty": {
+          "type": "string",
+          "description": "Optional difficulty tier.",
+          "enum": ["easy", "medium", "hard"],
+          "maxLength": 16
+        },
+        "explanation": {
+          "type": "string",
+          "description": "Pedagogical explanation displayed after answering.",
+          "maxLength": 3000
+        },
+        "isActive": {
+          "type": "boolean",
+          "description": "Whether the question is currently active in gameplay."
+        },
+        "isPendingAnswer": {
+          "type": "boolean",
+          "description": "Whether the correct answer is still pending teacher entry."
+        },
+        "tags": {
+          "type": "array",
+          "description": "Bounded topic tags."
+        },
+        "mediaType": {
+          "type": "string",
+          "description": "Attached media classification.",
+          "enum": ["image", "video", "none"],
+          "maxLength": 16
+        },
+        "mediaUrl": {
+          "type": "string",
+          "description": "External HTTPS URL, bundled asset path, or questionMedia document reference.",
+          "maxLength": 4096
+        },
+        "mediaDocId": {
+          "type": "string",
+          "description": "Optional reference ID in the questionMedia collection for compressed teacher images.",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "locationFocus": {
+          "type": "string",
+          "description": "Geographical focus area.",
+          "enum": ["Cyprus", "Greece", "Both", "Mediterranean"],
+          "maxLength": 32
+        },
+        "speciesFocus": {
+          "type": "array",
+          "description": "Bounded list of target vulture species."
+        },
+        "options": {
+          "type": "array",
+          "description": "Answer options for multiple_choice, multiple_choice_multi, or image_matching."
+        },
+        "correctAnswer": {
+          "type": "string",
+          "description": "Correct answer option ID (string) or boolean flag for true_false."
+        },
+        "correctAnswers": {
+          "type": "array",
+          "description": "Correct option IDs for multiple_choice_multi."
+        },
+        "leftHeader": {
+          "type": "string",
+          "description": "Left column header for text_matching.",
+          "maxLength": 200
+        },
+        "rightHeader": {
+          "type": "string",
+          "description": "Right column header for text_matching.",
+          "maxLength": 200
+        },
+        "pairs": {
+          "type": "array",
+          "description": "Matching pairs for text_matching."
+        },
+        "promptImage": {
+          "type": "string",
+          "description": "Optional prompt image reference for image_matching.",
+          "maxLength": 4096
+        },
+        "promptDescription": {
+          "type": "string",
+          "description": "Optional prompt description for image_matching.",
+          "maxLength": 2000
+        },
+        "matchType": {
+          "type": "string",
+          "description": "Subtype for image_matching.",
+          "enum": ["identify_species", "identify_silhouette", "pair_equipment", "identify_nest"],
+          "maxLength": 32
+        },
+        "stationName": {
+          "type": "string",
+          "description": "Station name for qr_scan questions.",
+          "maxLength": 200
+        },
+        "stationLocation": {
+          "type": "string",
+          "description": "Station location label for qr_scan questions.",
+          "maxLength": 300
+        },
+        "qrPayload": {
+          "type": "string",
+          "description": "Expected QR payload token for qr_scan questions.",
+          "maxLength": 500
+        },
+        "fieldClue": {
+          "type": "string",
+          "description": "Field clue shown for qr_scan questions.",
+          "maxLength": 2000
+        },
+        "stationType": {
+          "type": "string",
+          "description": "Station category for qr_scan questions.",
+          "enum": [
+            "nesting_cliff",
+            "feeding_station",
+            "patrol_post",
+            "information_center",
+            "acclimatization_aviary"
+          ],
+          "maxLength": 40
+        },
+        "taskPrompt": {
+          "type": "string",
+          "description": "Field task prompt for photo_upload or video_upload.",
+          "maxLength": 2000
+        },
+        "verificationCriteria": {
+          "type": "array",
+          "description": "Verification checklist items for field upload tasks."
+        },
+        "exampleDescription": {
+          "type": "string",
+          "description": "Example submission guidance for photo_upload.",
+          "maxLength": 1000
+        },
+        "targetSubject": {
+          "type": "string",
+          "description": "Target subject identifier for field upload tasks.",
+          "maxLength": 64
+        },
+        "durationSecondsMax": {
+          "type": "number",
+          "description": "Maximum allowed duration in seconds for video_upload."
+        },
+        "orderIndex": {
+          "type": "number",
+          "description": "Deterministic display sort index preserving original bank order."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of last administrative update."
+        },
+        "updatedByUid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the teacher/admin who last saved the question.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "title",
+        "assignedTeamIds",
+        "points",
+        "explanation",
+        "isActive",
+        "updatedAt",
+        "updatedByUid"
+      ]
+    },
+    "QuestionBankMeta": {
+      "title": "QuestionBankMeta",
+      "description": "Authoritative metadata and version counter for cross-device question bank synchronization.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Metadata document ID (e.g., current).",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "version": {
+          "type": "number",
+          "description": "Monotonic bank version number."
+        },
+        "totalCount": {
+          "type": "number",
+          "description": "Total number of questions in the bank."
+        },
+        "activeCount": {
+          "type": "number",
+          "description": "Number of active questions in the bank."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the latest bank synchronization."
+        },
+        "updatedByUid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the teacher/admin who triggered the sync.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        }
+      },
+      "required": [
+        "id",
+        "version",
+        "totalCount",
+        "activeCount",
+        "updatedAt",
+        "updatedByUid"
+      ]
+    },
+    "QuestionMedia": {
+      "title": "QuestionMedia",
+      "description": "Compressed teacher-uploaded question photograph stored separately from main question metadata to remain well below Firestore's 1 MiB document limit.",
+      "type": "object",
+      "properties": {
+        "questionId": {
+          "type": "string",
+          "description": "Associated question ID matching this document ID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "mimeType": {
+          "type": "string",
+          "description": "Image MIME type.",
+          "enum": ["image/webp", "image/jpeg", "image/png"],
+          "maxLength": 32
+        },
+        "dataUrl": {
+          "type": "string",
+          "description": "Compressed base64 image data URI.",
+          "minLength": 20,
+          "maxLength": 800000
+        },
+        "byteSize": {
+          "type": "number",
+          "description": "Approximate decoded image size in bytes."
+        },
+        "width": {
+          "type": "number",
+          "description": "Image width in pixels."
+        },
+        "height": {
+          "type": "number",
+          "description": "Image height in pixels."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the media document was saved."
+        },
+        "updatedByUid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the teacher/admin who uploaded the image.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        }
+      },
+      "required": [
+        "questionId",
+        "mimeType",
+        "dataUrl",
+        "byteSize",
+        "updatedAt",
+        "updatedByUid"
+      ]
+    },
+    "AdminUser": {
+      "title": "AdminUser",
+      "description": "Authorized teacher administrator record containing restricted account metadata.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID matching the document ID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Verified administrator email address.",
+          "minLength": 3,
+          "maxLength": 254
+        },
+        "role": {
+          "type": "string",
+          "description": "Administrative role level.",
+          "enum": ["admin"],
+          "maxLength": 16
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the admin record was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the admin record was last updated."
+        }
+      },
+      "required": [
+        "uid",
+        "email",
+        "role",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/questions/{questionId}": {
+      "schema": { "$ref": "#/entities/Question" },
+      "description": "Permanent question bank documents (publicly readable curriculum items, writable strictly by verified admins)."
+    },
+    "/questionBankMeta/{metaId}": {
+      "schema": { "$ref": "#/entities/QuestionBankMeta" },
+      "description": "Synchronization version and bank count metadata (publicly readable, writable strictly by verified admins)."
+    },
+    "/questionMedia/{questionId}": {
+      "schema": { "$ref": "#/entities/QuestionMedia" },
+      "description": "Compressed teacher-uploaded photographs stored per question (publicly readable during gameplay, writable strictly by verified admins)."
+    },
+    "/admins/{uid}": {
+      "schema": { "$ref": "#/entities/AdminUser" },
+      "description": "Authorized teacher admin allowlist documents (strictly isolated PII, readable only by owner or admin, writable strictly by bootstrapped admin)."
+    }
+  }
+}

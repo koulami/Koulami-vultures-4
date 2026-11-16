@@ -3,10 +3,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { IncomingMessage, ServerResponse } from 'http';
+import type { IncomingMessage, ServerResponse } from 'http';
 import fs from 'fs';
 import path from 'path';
-import { defaultQuestions, mergeQuestionBanks } from '../data/defaultGame';
+import { defaultQuestions, mergeQuestionBanks } from '../data/defaultGame.ts';
+import { handleImageKitSandboxApiRequest } from './imageKitSandboxHandler.ts';
 
 export interface TeamProgressReport {
   teamId: string;
@@ -240,6 +241,9 @@ function saveServerQuestionsToDisk() {
  */
 export async function handleGameApiRequest(req: IncomingMessage, res: ServerResponse): Promise<boolean> {
   const url = req.url || '';
+  if (url.startsWith('/api/imagekit')) {
+    return handleImageKitSandboxApiRequest(req, res);
+  }
   if (!url.startsWith('/api/game') && !url.startsWith('/api/station-media')) {
     return false;
   }

@@ -3,13 +3,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
+import type {
   GameArenaConfig,
   Question,
   Team,
-} from '../types/game';
-import { importedQuestionsFromJSON } from './importedQuestions';
-import { newQuestionsSet } from './newQuestions';
+} from '../types/game.ts';
+import { importedQuestionsFromJSON } from './importedQuestions.ts';
+import { newQuestionsSet } from './newQuestions.ts';
 
 /**
  * 4 DISTINCT TEAMS FOR THE VULTURE CYPRUS ARENA:

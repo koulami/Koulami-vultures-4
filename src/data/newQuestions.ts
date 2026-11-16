@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Question } from '../types/game';
+import type { Question } from '../types/game.ts';
 
 /**
  * 48 NEW AUTHENTIC GREEK QUESTIONS AND MISSIONS FOR THE VULTURE EDUCATIONAL GAME

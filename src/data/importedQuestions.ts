@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Question } from "../types/game";
+import type { Question } from "../types/game.ts";
 
 /**
  * 75 AUTHENTIC QUESTIONS IMPORTED FROM:
